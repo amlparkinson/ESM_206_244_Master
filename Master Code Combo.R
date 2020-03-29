@@ -7816,6 +7816,636 @@ catch_summary = function (fish) {
 
 catch_summary(catch)
 
+################################### ESM 244: Lab 10 #####################################
+
+coding in python and sql in R
+
+################################### ESM 244: Lab 9 ######################################
+
+
+```{r}
+library(gt)
+library(tidyverse)
+library(here)
+library(boot)
+library(patchwork)
+library(broom)
+library(nlstools)
+```
+
+## fun tables with gt package
+
+use the life cycle savings built in data (?LifeCycleSavings or view(LifeCycleSavings))
+
+gt is a create package for making tables. Takes more code than kableextra, but gt is a lot easier than kableExtra when want a more specialized table
+```{r}
+
+#tidy data
+disp_income <- LifeCycleSavings %>% 
+  rownames_to_column() %>% 
+  arrange(dpi) %>% 
+  head(5) %>% 
+  mutate(ddpi = ddpi/100,
+         pop15 = pop15/100,
+         pop75 = pop75/100) #convert % values to decimal values. easier/better to work with decimals when doing stats, but when present data better to use percent
+
+# create gt table
+
+# simple table. great that gt recognizes the rowname column doesnt need a column name.
+disp_income %>% 
+  gt()
+
+# better looking table
+disp_income %>% 
+  gt() %>% 
+  tab_header(
+    title = "Life cycle savings",
+    subtitle = "5 countries with lowest per capita disposable income"
+  ) %>% 
+  fmt_currency(
+    columns = vars(dpi),
+    decimals = 2
+  ) %>% 
+  fmt_percent(vars(pop15, pop75, ddpi), 
+              decimals = 1) %>% 
+  tab_options(
+    table.width = pct(80) # table will always be 80% of page width even if adjust page width
+  ) %>% 
+  tab_footnote(
+    footnote = "Data averaged from 1970-1980",
+    location = cells_title() #footnot function NEEDS a location
+  ) %>% 
+  data_color(
+    columns = vars(dpi),
+    colors = scales::col_numeric(
+      palette = c("orange", "red", "purple"),
+      domain = c(88:190))
+  ) %>% 
+  data_color(
+    columns = vars(sr),
+    colors = scales::col_numeric(
+      palette = c("orange", "red", "purple"),
+      domain = c(5:10)) # set a range for values to be included in the coloring scheme. 
+  ) %>% 
+  cols_label(sr = "Savings Ratio")
+
+
+```
+
+
+## explore salinity data with bootstrapping
+
+salinity dataset is a built in R dataset
+
+```{r}
+#visualize data
+hist(salinity$sal)
+ggplot(data = salinity, aes(sample=sal)) +
+  geom_qq() #eh, looks linear enough
+
+# t test
+t.test(salinity$sal)
+
+```
+
+do bootstrapping to find sampling dist based on data instead of based entirely on one sample and assumptions
+```{r}
+
+# get just sal column into a vector
+sal_nc <- salinity$sal
+
+#step 1: create functino to calculate the mean of the many bootstrap samples
+
+mean_fun <- function (x, i) {mean(x[i])}
+
+# step 2: bootstrap!
+salboot100 <- boot(data = sal_nc, 
+                   statistic = mean_fun,
+                   R = 100)
+
+salboot10k <- boot(data = sal_nc, 
+                   statistic = mean_fun,
+                   R = 10000)
+
+# step 3: get confidence interval fromm the bootstrap data
+boot.ci(salboot10k, conf = 0.95)
+
+# step 4: make data frame to store the means for each bootstrap iteration
+salboot_100_df <- data.frame(bs_mean = salboot100$t)
+salboot_10k_df <- data.frame(bs_mean = salboot10k$t)
+
+#step 5: plot the bootstrap sampling distribution (always visualize your data)
+p1 <- ggplot(data= salinity, aes(x = sal)) + geom_histogram()
+p2 <- ggplot(data = salboot_100_df, aes(x = bs_mean)) + geom_histogram()
+p3 <- ggplot(data = salboot_10k_df, aes(x = bs_mean)) + geom_histogram()
+
+#use patchwork package to display the graphs
+p1 + p2 + p3
+
+p1 + p2/ p3
+
+(p1 + p2)/ p3
+
+
+
+```
+
+do salboot_100$t to see the mean for each of the x number of means for each bootstrap iteration
+
+can set seed to make sure you and collaboraters are getting the same results, but also dont set seed at first to make sure the values arent changing a lot
+
+
+
+
+
+## exampleL nonlinear least squares
+
+```{r}
+#load data
+df <- read_csv(here("data", "log_growth.csv"))
+
+#visualize data
+ggplot(data=df, aes(x=time, y=pop)) +
+  geom_point()
+
+#try transforming data
+ggplot(data=df, aes(x=time, y=log(pop))) +
+  geom_point()
+
+```
+
+
+```{r}
+
+# Get only up to 14 hours & ln transform pop
+df_exp <- df %>% 
+  filter(time < 15) %>% 
+  mutate(ln_pop = log(pop))
+
+# Model linear to get *k* estimate:
+lm_k <- lm(ln_pop ~ time, data = df_exp)
+lm_k
+
+# Coefficient (k) ~ 0.17
+```
+
+
+now LNS 
+```{r}
+df_nls <- nls(pop ~ K/(1 + A*exp(-r*time)),
+              data = df, 
+              start = list(K = 180, A = 18, r = 0.17),
+              t = T) # trace = T means the code will tell us all the iterative processes it went through to get the results
+
+summary(df_nls)
+
+# Use broom:: functions to get model outputs in tidier format: 
+model_out <- broom::tidy(df_nls)
+
+# Want to just get one of these? 
+A_est <- tidy(df_nls)$estimate[1]
+
+
+```
+
+value in the left is trying to minimize the sum of squares of residuals (aka SSE). So the other columns values change to continue to minimize that value in the left column
+
+# visualize model
+```{r}
+
+#mock data for time variable
+t_seq <- seq(from = 0, to = 35, length = 200)
+
+# Make predictions for the population at all of those times (t) in the sequence. Here, only saying the time variable will change (K, A, and r are NOT changing they are constants in our model)
+
+p_predict <- predict(df_nls, newdata = t_seq) # output is the estimate of ...?
+
+# bind together time values and prediction values
+df_complete <- data.frame(df, p_predict)
+
+# plot
+ggplot(data = df_complete, aes(x=time, y=pop)) +
+  geom_point() +
+  geom_line(aes(x = time, y = p_predict)) +
+  theme_minimal()
+
+```
+
+
+```{r}
+df_ci <- confint2(df_nls)
+```
+
+##################################### ESM 244: Lab 8 ##################################
+
+
+#load packages and data
+```{r}
+#general packages
+library(tidyverse)
+library(here)
+
+#text mining packages
+library(pdftools)
+library(tidytext)
+library(textdata)
+library(ggwordcloud)
+
+# data
+ipcc_path <- here("data","ipcc_gw_15.pdf")
+ipcc_text <- pdf_text(ipcc_path)
+
+#view(ipcc_text)
+
+```
+
+every page gets its own line
+
+Example: Just want to get text from a single page (e.g. Page 9)? 
+  ```{r}
+ipcc_p9 <- ipcc_text[9]
+```
+
+
+\r\n represents a line break in pdf
+
+## get this into data frame shape and do some wrangling
+```{r}
+# split up pages into seperate lines using "\r\n" using stringr::str_split()
+ipcc_df <- data.frame(ipcc_text) %>% 
+  mutate(text_full = str_split(ipcc_text, pattern = "\r\n")) # now, each page has its own row. 
+
+# unnest into regular columns using tidyr::unnest()
+ipcc_df <- ipcc_df %>% 
+  unnest(text_full) # each line has its own row. The ipcc_text column has the full text of the page for each line
+
+# remove leading/trailing white space using stringr::str_trim()
+ipcc_df <- ipcc_df %>%
+  mutate(text_full = str_trim(text_full))  # this removes spaces before and after the first string in each line
+
+```
+
+## get tokens using unnest_tokens() (ie make a row for every word)
+```{r}
+ipcc_tokens <- ipcc_df %>% 
+  unnest_tokens(word, text_full) # name of new column, name of column to apply this function to
+```
+this makes alkl words lowercase, so later analyses wont be messed up by having the some word stored in different formats (ie Cat vs cat)
+
+
+## count all the words
+```{r}
+ipcc_wc <- ipcc_tokens %>% 
+  count(word)
+```
+
+## remove stop words
+```{r}
+
+#view(stop_words) # contains over 1,100 words and some words you may actually want to analyze! so can remove some of these words stop_word %>% filter ... to remove words you would want included in the data frame for future analysis> or can create your own list of stop words to use
+
+ipcc_stop <- ipcc_tokens %>% 
+  anti_join(stop_words) %>% #anti join removes all words from the stop_words list from the ipcc_tokens df
+  dplyr::select(-ipcc_text) 
+
+
+
+```
+
+##remove all numeric values
+
+may want to do analysis that inlcudes numbers and can create a filter for that. But for now getting rid of all numbers
+other ways to remove rows with numbers, but were using this version
+```{r}
+ipcc_no_numbers <- ipcc_stop %>% 
+  dplyr::filter(is.na(as.numeric(word))) # this asks if a value is numeric and if it is, remove it
+```
+
+### Visualization!!
+
+# word cloud (for top 100 words)
+```{r}
+#sub data
+ipcc_top100 <- ipcc_no_numbers %>% 
+  count(word) %>% 
+  arrange(-n) %>% 
+  head(100)
+
+#word cloud
+
+ipcc_cloud <- ggplot(data = ipcc_top100, aes(label = word)) +
+  geom_text_wordcloud() +
+  theme_minimal() #--> underwhelming/boring word cloud
+
+#amped up word cloud
+ggplot(data = ipcc_top100, aes(label = word, size = n)) +
+  geom_text_wordcloud_area(aes(color = n), shape = 'diamond') +
+  scale_size_area(max_size = 12) +
+  scale_color_gradientn(colors = c("darkgreen", "blue", "purple")) +
+  theme_minimal()
+
+```
+
+
+#### Sentiment analysis
+
+```{r}
+# get_sentiments(lexicon = "afinn") ; when prompted say Yes
+
+#create df 
+afinn_pos <- get_sentiments(lexicon = "afinn") %>% 
+  filter(value %in% c(3,4,5))
+
+#check sentiments of words
+get_sentiments(lexicon = "bing")
+```
+
+
+# bind together words that are both in the sentiment afinn df and ipcc_stop df
+some words will be lost, so for future anlyses will want to be careful
+
+```{r}
+ipcc_afinn <- ipcc_stop %>% 
+  inner_join(get_sentiments(lexicon = "afinn"))
+```
+
+
+# infd counts of value rankings
+```{r}
+ipcc_afinn_hist <- ipcc_afinn %>% 
+  count(value)
+
+ggplot(ipcc_afinn_hist, aes(x = value, y = n)) +
+  geom_col()
+```
+
+
+Investigate some of the words in a bit more depth:
+  ```{r}
+# What are these '2' words?
+ipcc_afinn2 <- ipcc_afinn %>% 
+  filter(value == 2)
+```
+
+```{r}
+ipcc_summary <- ipcc_afinn %>% 
+  summarize(mean_score = mean(value),
+            median_score = median(value))
+```
+unsurprisingly, the IPCC report is pretty neutral. 
+
+## checkk out sentiments by NRC
+
+We can use the NRC lexicon to start "binning" text by the feelings they're typically associated with. As above, we'll use inner_join() to combine the IPCC non-stopword text with the nrc lexicon: 
+  
+  ```{r}
+ipcc_nrc <- ipcc_stop %>% 
+  inner_join(get_sentiments("nrc"))
+```
+
+Wait, won't that exclude some of the words in our text? YES! We should check which are excluded using `anti_join()`:
+
+```{r}
+ipcc_exclude <- ipcc_stop %>% 
+anti_join(get_sentiments("nrc"))
+
+# View(ipcc_exclude)
+
+# Count to find the most excluded:
+ipcc_exclude_n <- ipcc_exclude %>% 
+count(word, sort = TRUE)
+
+head(ipcc_exclude_n)
+```
+
+Lesson: always check which words are EXCLUDED in sentiment analysis using a pre-built lexicon! 
+
+Now find some counts: 
+```{r}
+ipcc_nrc_n <- ipcc_nrc %>% 
+count(sentiment, sort = TRUE) %>% 
+mutate(sentiment = as.factor(sentiment)) %>% 
+mutate(sentiment = fct_reorder(sentiment, -n)) # says to reorder the different groups not based on alphabetical order (which is the default) but by the values in the n column
+
+#check levels: levels(ipcc_nrc_n$sentiment)
+
+# And plot them:
+
+ggplot(data = ipcc_nrc_n, aes(x = sentiment, y = n)) +
+geom_col()
+```
+
+for each sentiment bin, ,what are the top 5 frequent words associated with each bin
+```{r}
+ipcc_nrc_n5 <- ipcc_nrc %>% 
+count(word, sentiment, sort = T) %>%  # this says to count the number of occurances of each word, but group by sentiment and sort (from highest to lowest)
+group_by(sentiment) %>% 
+top_n(5) %>% 
+ungroup()
+
+#should have 50 total columns, but when there are ties when using top_n, it inlcudes both rows when there are ties, so can end up with more than 50
+
+
+```
+
+#plot!
+```{r}
+ggplot(ipcc_nrc_n5, aes(x = reorder(word, n), y = n, fill = sentiment)) +
+geom_col(show.legend = F) +
+facet_wrap(~sentiment, ncol = 2, scales = "free")
+
+```
+
+
+things to consider:
+
+- text mining/analysis does not capture the double meaning of some words, words in your field may not be included in some of the seniment/lexicon packages so will have to manually add them or create your own package, 
+- for these reasons, have to think critically when doing this type of analysis! dont just blindly follow code. 
+
+
+
+############################# ESM 244: Lab 7 ######################################
+
+# load packages
+```{r}
+
+#general
+library(tidyverse)
+library(here)
+library(janitor)
+library(plotly)
+
+#spatial maps
+library(tmap)
+library(maptools)
+library(sf)
+library(sp)
+library(spatstat)
+library(raster)
+
+#cluster analysis
+library(NbClust)
+library(cluster)
+library(factoextra)
+library(dendextend)
+library(ggdendro)
+```
+
+
+# load data
+```{r}
+
+#species data
+voles <- read_sf(dsn = here("data","redtreevoledata"), 
+layer = "ds033") %>% 
+dplyr::select(COUNTY) %>% 
+filter(COUNTY == "HUM") %>% 
+st_transform(crs = 4326)
+
+st_crs(voles) # check projection
+# hUmbolt county layer
+humboldt <- read_sf(dsn = here("data", "redtreevoledata"), layer = "california_county_shape_file", crs = 4326) %>% 
+filter(NAME == "Humboldt") %>% 
+dplyr::select(NAME)
+
+st_crs(humboldt) # check projection
+
+# used two different crs methods. Depends on whether there is a crs assigned in the original dat or not, but the latter method works for either situation. 
+
+```
+
+```{r}
+#initial visualization of the data
+plot(voles)
+plot(humboldt)
+
+# tmap
+tm_shape(humboldt) +
+tm_fill() +
+tm_shape(voles) +
+tm_dots(size = 0.2)
+
+ggplot() +
+geom_sf(data = humboldt) +
+geom_sf(data = voles)
+
+```
+
+#convert vole events and humboldt polygon to point pattern + window
+
+```{r}
+voles_sp <- as(voles, "Spatial") #ensure R recognizes the voles data set as spatial data. Some functions dont like sf data
+
+#voles_ppp <- as(voles_sp, "ppp") # errors with package, allison will update later
+
+```
+
+# cluser analysis
+
+## K means
+
+```{r}
+#clean data
+iris_nice <- iris %>% 
+clean_names()
+
+# explore data
+ggplot(iris_nice) +
+geom_point(aes(x = petal_length, y = petal_width, color = species))
+
+# we think it looks like there are 3 clusters
+# ask R how many clusters it thinks there are
+number_est <- NbClust(iris_nice[1:4], # the brackets tells R to only conisder data in columns 1-4
+min.nc = 2,
+max.nc = 10,
+method = "kmeans") # use ?NbClust to see all the diff methods that can be used
+
+
+```
+
+
+graph output = count of how many algorithms thought the data had x number of clusters. Here the algorithms think 2 groups is most likley, but R is NO substitute for assessing the data visually yourself and we think that sicne there are 3 species 3 clusters make sense
+
+
+```{r}
+# run kmeans
+iris_km <- kmeans(iris_nice[1:4], 3)
+
+# use iris_km$cluster to determine what cluster R thinks each observation belongs to
+```
+size outputs have to add up to 100
+
+```{r}
+# bind the cluster number together with the original data
+
+iris_cl <- data.frame(iris_nice, cluster_no = factor(iris_km$cluster)) # can also use as.factor
+
+# plot 
+ggplot(iris_cl) +
+geom_point(aes(x = sepal_length, y = sepal_width, color = cluster_no))
+
+```
+
+```{r}
+plot_ly(x = iris_cl$petal_length,
+y = iris_cl$petal_width,
+z = iris_cl$sepal_width,
+color = iris_cl$cluster_no,
+type = "scatter3d"
+)
+#allisons code
+plot_ly(x = iris_cl$petal_length, 
+y = iris_cl$petal_width, 
+z = iris_cl$sepal_width, 
+type = "scatter3d", 
+color = iris_cl$cluster_no, 
+symbol = ~iris_cl$species,
+marker = list(size = 3),
+colors = "Set1")
+```
+
+## Hierarchical cluster analysis
+
+Relevant functions:
+
+stats::hclust() - agglomerative hierarchical clustering
+cluster::diana() - divisive hierarchical clustering
+
+```{r}
+
+# load data
+wb_env <- read_csv(here("data", "wb_env.csv")) 
+
+#sub-data: only keep top 20 emitters
+wb_ghg_20 <- wb_env %>% 
+arrange(-ghg) %>% 
+head(20)
+
+# scale data so all variables are on the same scale
+wb_scaled <- as.data.frame(scale(wb_ghg_20[3:7]))
+
+# Update data frame to add rownames (country name)
+rownames(wb_scaled) <- wb_ghg_20$name
+
+```
+
+### find distances(create dissimilaraity matrix)
+```{r}
+#calc euclidean
+diss <- dist(wb_scaled, method = "euclidean")
+
+# use euclidean distances to do some complete agglomerate clustering
+hc_complete <- hclust(diss, method = "complete")
+
+# plot outputs
+plot(hc_complete)
+
+# nicer plot
+ggdendrogram(hc_complete, rotate = T)
+
+```
+things clustered closer on the dendeogram = closer relation in multivariate space, countries further apart = more dissimilar
+
 
 
 
