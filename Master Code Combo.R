@@ -8447,10 +8447,2193 @@ ggdendrogram(hc_complete, rotate = T)
 things clustered closer on the dendeogram = closer relation in multivariate space, countries further apart = more dissimilar
 
 
+########################## NPS FPL internship: drought indices #############################
+
+*This code is for iteratively calculating different indices from satellite imagery. Several indicies are available pre-calculated on http://climateengine.org/ . Description for how to use the website is avaiable in the Resources folder.*
+
+
+# Packages
+```{r}
+library(raster)
+library(here)
+library(tidyverse)
+library(rgdal)
+library(RStoolbox)
+library(sf)
+library(rgeos)
+library(janitor)
+```
+
+# SAMO boundary
+```{r}
+samo <- readOGR(here::here("SAMO Boundary", "SAMO_Boundary.shp"))
+samo <- spTransform(samo, CRS('+proj=utm +zone=11 +datum=WGS84 +units=m +no_defs'))
+```
+
+# Background
+
+*NDVI*
+
+NDVI = (NIR - red)/(NIR + red)
+
+landsat 4&5: band 4 = nir; band 3 = red 
+landsat   8: band 5 = nir; band 4 = red
+
+ndvi = quantitative index of greenness ranging from 0-1, where 0 represents minimal or no greenness and 1 represents maximum greenness. Values of -1 to 0 = water, -0.1 to 0.1 = barren, rocks, sand, snow 
+
+*NDWI*
+
+NDWI = (NIR - SWIR) / (NIR + SWIR)
+
+landsat 4&5: band 4 = nir; band 3 = red 
+landsat   8: band 5 = nir; band 4 = red
+
+ndwi =  indicator sensitive to the change in the water content of leaves (Gao, 1996).  ndwi = a dimensionless and varies between -1 to +1, depending on the leaf water content but also on the vegetation type and cover. High values =  correspond to high vegetation water content and to high vegetation fraction cover. Low values correspond to low vegetation water content and low vegetation fraction cover. In period of water stress, NDWI will decrease. https://edo.jrc.ec.europa.eu/documents/factsheets/factsheet_ndwi.pdf
+
+https://www.usgs.gov/land-resources/nli/landsat/normalized-difference-moisture-index says there's a scale factor of 0.0001 but I ran the code with and without multiplying  by 0.0001 and got the same value. 
+
+*EVI*
+  
+  recommended by chris (Geography PhD student) who is also using EVI to monitor drought https://ckibler.com/
+  
+  EVI = 2.5*((NIR - Red) / (NIR + 6 * Red - 7.5 * Blue + 1))
+  
+  landsat 4,5,7: 2.5*(Band4 - Band3) / (Band4 + 6*Band3 - 7.5*Band1 + 1)) 
+landsat 8:     2.5*(Band5 - Band4) / (Band5 + 6*Band4 - 7.5*Band2 + 1))
+
+https://www.usgs.gov/land-resources/nli/landsat/landsat-enhanced-vegetation-index?qt-science_support_page_related_con=0#qt-science_support_page_related_con
+
+evi2 <- 2.5*((nir_crop - red_crop) / (nir_crop + 2.4 * red_crop + 1)) https://www.researchgate.net/post/How_to_calculate_EVI_from_landsat_7_surface_reflectance_products
+
+
+Now, talking about NDVI an EVI2 value range. Mathematically, NDVI: (-1,1) and EVI: (-1, 1,25). However, in real life, we normally have NDVI and EVI both are greatet than 0, excepts for some water pixels (can be slightly negative). https://www.researchgate.net/post/hello_does_anyone_know_the_range_of_output_values_for_EVI2_I_know_NDVI_is_between-1_to_1_Thank_you
+
+NDVI v EVI
+https://earthobservatory.nasa.gov/features/MeasuringVegetation/measuring_vegetation_4.php
+
+
+# How to use the below code
+The code is set up to iteratively calculate indices for several years/images. 
+
+The code is split up to calculate Landsat imagery separately if the image is from landsat 4/5 or 8 as the bands correspond to different numbers. There is a way to calclate indices from landsat 4, 5, and 8 all in one code chunk, but I do not know how to do that. So the code here is set up to calculate indicies separately for landsat 4/5 and landsat 8 imagery. I put the landsat 4/5 and 8 imagery in different folders. 
+
+The code reads in several images and stores their file names. I manually changed the file names to be just the year and month the image was taken so it can be used to name the output image at the end of the code. 
+The code then loops through each image and selects the bands needed to calculate the index. The bands are then clipped and cropped to the SAMO boundary to decrease calculation time. Then the index is calculated and stored in a list. Finally the calculated index is output into the selected folder using the name of the file the imagary was stored in to name the output raster.
+
+The code is all set up to run. Only a few things need to be changed:
+  -The file path of the location where the imagery is stored. Note: R only likes forward slashes (/), backwards slashes will give an error
+-The file path in the setwd() also needs to be changed. This is the location of where the created images will be stored. 
+
+I then go into Arc and use a ModelBuilder script to get individual pixel values.
+
+Do note that to calculate the indicies can take some time to calculate, especially wither hier resolution imagery.
+
+# EVI landsat 4-5
+
+```{r}
+## read in list of folders  -----------------------------------------------
+folds <- list.files(path = "C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/Landsat4_5", full.names=T)
+folds.nms <- list.files(path = "C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/Landsat4_5", full.names=F)
+
+## loop through each folder, grab the files you want then ndvi them. ------------
+
+evi_outputs <- list() ##  list to keep all the stuff in
+
+for (i in 1:length(folds)) {
+  
+  ## get bands
+  blue_nm <- list.files(folds[i], pattern = "band1", full.names = T)
+  blue <- raster(blue_nm)*0.0001   
+  red_nm <- list.files(folds[i], pattern = "band3", full.names = T)
+  red <- raster(red_nm)*0.0001 
+  nir_nm <- list.files(folds[i], pattern = "band4", full.names = T)
+  nir <- raster(nir_nm)*0.0001 
+  
+  # clip image to samo boundary
+  nir_mask <- mask(nir, samo)
+  red_mask <- mask(red, samo)
+  blue_mask <- mask(blue, samo)
+  #plot(nir_mask)
+  
+  ##crop image using the extent of the samo boundary
+  nir_crop <- crop(nir_mask , extent(samo))
+  red_crop <- crop(red_mask , extent(samo))
+  blue_crop <- crop(blue_mask , extent(samo))
+  #plot(nir_crop)
+  
+  ## EVI band math
+  evi <- 2.5*((nir_crop - red_crop) / (nir_crop + (6 * red_crop) - (7.5 * blue_crop) + 1))
+  
+  ## store evi
+  evi_outputs[[i]] <- evi
+  
+  ## save rasters
+  setwd("C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/drought_indices_outputs/baseline_evi") #set directory to store output images
+  writeRaster(evi, filename = paste0(folds.nms[i], "_evi.tif"))
+  
+}
+
+
+```
+
+# EVI landsat 8
+```{r}
+## read in list of folders  -----------------------------------------------
+
+folds <- list.files(path = "D:/USGS Imagery/Landsat8", full.names=T)
+folds.nms <- list.files(path = "D:/USGS Imagery/Landsat8", full.names=F)
+
+evi_outputs <- list() ##  list to keep all the stuff in
+
+for (i in 1:length(folds)) {
+  
+  ## get bands
+  blue.nm <- list.files(folds[i], pattern = "band2", full.names = T)
+  blue  <- raster(blue.nm)*0.0001   
+  red.nm  <- list.files(folds[i], pattern = "band4", full.names = T)
+  red   <- raster(red.nm)*0.0001 
+  nir.nm  <- list.files(folds[i], pattern = "band5", full.names = T)
+  nir   <- raster(nir.nm)*0.0001 
+  
+  ## clip image to samo boundary
+  nir_mask <- mask(nir, samo)
+  red_mask <- mask(red, samo)
+  blue_mask <- mask(blue, samo)
+  #plot(nir_mask)
+  
+  ##crop image using the extent of the samo boundary
+  nir_crop <- crop(nir_mask , extent(samo))
+  red_crop <- crop(red_mask , extent(samo))
+  blue_crop <- crop(blue_mask , extent(samo))
+  #plot(nir_crop)
+  
+  ## EVI band math
+  evi <- 2.5*((nir_crop - red_crop) / (nir_crop + (6 * red_crop) - (7.5 * blue_crop) + 1))
+  
+  ## store evi
+  evi_outputs[[i]] <- evi
+  
+  ## save rasters
+  setwd("C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/drought_indices_outputs/evi_monthly")
+  writeRaster(evi, filename = paste0(folds.nms[i], "_evi.tif"))
+  
+}
+
+```
+
+
+
+
+# EVI with Sentinel 2 
+
+Blue = B02
+Red = B04
+NIR = B08
+
+https://gisgeography.com/sentinel-2-bands-combinations/
+  ```{r}
+
+## read in list of folders  -----------------------------------------------
+folds <- list.files(path = "D:/USGS Imagery/Sentinel2", full.names=T)
+folds.nms <- list.files(path = "D:/USGS Imagery/Sentinel2", full.names=F)
+
+evi_outputs <- list() ##  list to keep all the stuff in
+
+for (i in 1:length(folds)) {
+  
+  ## get bands
+  blue.nm <- list.files(folds[i], pattern = "B02", full.names = T)
+  blue  <- raster(blue.nm)*0.0001   
+  red.nm  <- list.files(folds[i], pattern = "B04", full.names = T)
+  red   <- raster(red.nm)*0.0001 
+  nir.nm  <- list.files(folds[i], pattern = "B08", full.names = T)
+  nir   <- raster(nir.nm)*0.0001 
+  
+  ## clip image to samo boundary
+  nir_mask <- mask(nir, samo)
+  red_mask <- mask(red, samo)
+  blue_mask <- mask(blue, samo)
+  #plot(nir_mask)
+  
+  ##crop image using the extent of the samo boundary
+  nir_crop <- crop(nir_mask , extent(samo))
+  red_crop <- crop(red_mask , extent(samo))
+  blue_crop <- crop(blue_mask , extent(samo))
+  #plot(nir_crop)
+  
+  ## EVI band math
+  evi <- 2.5*((nir_crop - red_crop) / (nir_crop + (6 * red_crop) - (7.5 * blue_crop) + 1))
+  
+  # store evi
+  evi_outputs[[i]] <- evi
+  
+  # save rasters
+  setwd("C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/drought_indices_outputs/sentinel_monthly_evi")
+  writeRaster(evi, filename = paste0(folds.nms[i], "_evi.tif"))
+  
+}
+
+
+```
+
+
+# NDVI landsat 4-5
+
+NDVI: band 4 = nir; band 3 = red
+
+```{r}
+## read in list of folders  -----------------------------------------------
+
+folds <- list.files(path = "D:/USGS Imagery/Landsat/Landsat4_5", full.names=T)
+folds.nms <- list.files(path = "D:/USGS Imagery/Landsat/Landsat4_5", full.names=F)
+
+
+## loop through each folder, grab the files you want then ndvi them.
+
+ndvi.outputs <- list() ##  list to keep all the stuff in
+
+for (i in 1:length(folds)) {
+  
+  ## get file names
+  nir.nm <- list.files(folds[i], pattern="band4", full.names = T)
+  nir <- raster(nir.nm)*0.0001 
+  red.nm <- list.files(folds[i], pattern="band3", full.names = T)
+  red <- raster(red.nm)*0.0001 
+  
+  ## clip image to samo boundary
+  nir_mask <- mask(nir, samo)
+  red_mask <- mask(red, samo)
+  #plot(nir_mask)
+  
+  ##crop image using the extent of the samo boundary 
+  nir_crop <- crop(nir_mask , extent(samo))
+  red_crop <- crop(red_mask , extent(samo))
+  #plot(nir_crop)
+  
+  ## NDVI band math
+  ndvi <- (nir_crop - red_crop) / (nir_crop + red_crop)
+  #plot(ndvi)
+  
+  ndvi.outputs[[i]] <- ndvi
+  
+  setwd("C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/drought_indices_outputs/ndwi_monthly")
+  writeRaster(ndvi, filename = paste0(folds.nms[i], "_ndvi.tif"))
+  
+}
+
+```
+
+
+
+# NDVI landsat 8
+
+NDVI: band 5 = nir; band 4 = red
+NDWI: band 5 = nir; band 6 = swir
+```{r}
+## read in list of folders  -----------------------------------------------
+
+folds <- list.files(path = "D:/USGS Imagery/Landsat/Landsat4_5", full.names=T)
+folds.nms <- list.files(path = "D:/USGS Imagery/Landsat/Landsat4_5", full.names=F)
+
+
+## loop through each folder, grab the files you want then ndvi them.
+
+ndvi.outputs <- list() ##  list to keep all the stuff in
+
+for (i in 1:length(folds)) {
+  
+  ## get file names
+  nir.nm <- list.files(folds[i], pattern="band5", full.names = T)
+  nir <- raster(nir.nm)*0.0001 
+  red.nm <- list.files(folds[i], pattern="band4", full.names = T)
+  red <- raster(red.nm)*0.0001 
+  
+  ## clip image to samo boundary
+  nir_mask <- mask(nir, samo)
+  red_mask <- mask(red, samo)
+  #plot(nir_mask)
+  
+  ##crop image using the extent of the samo boundary 
+  nir_crop <- crop(nir_mask , extent(samo))
+  red_crop <- crop(red_mask , extent(samo))
+  #plot(nir_crop)
+  
+  ## NDVI band math
+  ndvi <- (nir_crop - red_crop) / (nir_crop + red_crop)
+  #plot(ndvi)
+  
+  ndvi.outputs[[i]] <- ndvi
+  
+  setwd("C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/drought_indices_outputs/ndwi_monthly")
+  writeRaster(ndvi, filename = paste0(folds.nms[i], "_ndvi.tif"))
+  
+}
+
+```
+
+# NDWI landsat 4-5
+
+NDVI: band 4 = nir; band 3 = red
+NDWI: band 4 = nir; band 5 = swir
+
+```{r}
+## read in list of folders  -----------------------------------------------
+
+folds <- list.files(path = "D:/USGS Imagery/Landsat/Landsat4_5", full.names=T)
+folds.nms <- list.files(path = "D:/USGS Imagery/Landsat/Landsat4_5", full.names=F)
+
+
+ndwi.outputs <- list() ##  list to keep all the stuff in
+
+for (i in 1:length(folds)) {
+  
+  ## get file names
+  nir.nm <- list.files(folds[i], pattern="band4", full.names = T)
+  nir <- raster(nir.nm)*0.0001 
+  swir.nm <- list.files(folds[i], pattern="band5", full.names = T)
+  swir <- raster(swir.nm)*0.0001 
+  
+  ## clip image to samo boundary
+  nir_mask <- mask(nir, samo)
+  swir_mask <- mask(swir, samo)
+  #plot(nir_mask)
+  
+  ##crop image using the extent of the samo boundary 
+  nir_crop <- crop(nir_mask , extent(samo))
+  swir_crop <- crop(swir_mask , extent(samo))
+  #plot(nir_crop)
+  
+  ## NDWI band math
+  ndwi <- (nir_crop - swir_crop) / (nir_crop + swir_crop)
+  #plot(ndvi)
+  
+  ndwi.outputs[[i]] <- ndwi
+  
+  setwd("C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/drought_indices_outputs/ndwi_monthly")
+  writeRaster(ndwi, filename = paste0(folds.nms[i], "_ndwi.tif"))
+  
+}
+
+```
+
+
+
+# NDWI landsat 8
+
+NDVI: band 5 = nir; band 4 = red
+NDWI: band 5 = nir; band 6 = swir
+```{r}
+## read in list of folders  -----------------------------------------------
+
+folds <- list.files(path = "C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/USGS Imagery/drought/Landsat8", full.names=T)
+folds.nms <- list.files(path = "C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/USGS Imagery/drought/Landsat8", full.names=F)
+
+ndwi.outputs <- list() ##  list to keep all the stuff in
+
+for (i in 1:length(folds)) {
+  
+  #landsat 4-5
+  #if(as.numeric(substr(folds[1], 3, 4)) == 8) { # not sure how to do this, so ill just make different loops for the different bands
+  
+  ## get file names
+  nir.nm <- list.files(folds[i], pattern="band5", full.names = T)
+  nir <- raster(nir.nm)
+  swir.nm <- list.files(folds[i], pattern="band6", full.names = T)
+  swir <- raster(swir.nm)
+  
+  ## clip image to samo boundary
+  nir_mask <- mask(nir, samo)
+  swir_mask <- mask(swir, samo)
+  #plot(nir_mask)
+  
+  ##crop image using the extent of the samo boundary  
+  nir_crop <- crop(nir_mask , extent(samo))
+  swir_crop <- crop(swir_mask , extent(samo))
+  #plot(nir_crop)
+  
+  ## NDWI band math
+  ndwi <- (nir_crop - swir_crop) / (nir_crop + swir_crop)
+  
+  ndwi.outputs[[i]] <- ndwi
+  
+  writeRaster(ndwi, filename = paste0(folds.nms[i], "_ndwi.tif"))
+  
+}
+
+```
 
 
 
 
 
 
+# calculate an index (in this case ndvi) year by year
+
+Just have 2 years set up (one for landsat4/5 nad one for landsat8), but it can be replicated for each year
+
+## 2004
+```{r}
+#load bands
+nir <- raster(here("./USGS Imagery/drought/LT05_L1TP_041036_20040925_20160913_01_T1_sr_band4.tif")) 
+red <- raster(here("./USGS Imagery/drought/LT05_L1TP_041036_20040925_20160913_01_T1_sr_band3.tif")) 
+
+#clip
+nir_mask <- mask(nir, samo)
+red_mask <- mask(red, samo)
+#plot(nir_mask)
+
+#crop 
+nir_crop <- crop(nir_mask , extent(samo))
+red_crop <- crop(red_mask , extent(samo))
+#plot(nir_crop)
+
+#ndvi
+ndvi <- (nir_crop - red_crop) / (nir_crop + red_crop)
+#plot(ndvi)
+
+#save raster
+writeRaster(ndvi, filename = here("drought_indices_outputs", "ndvi_2004.tif"))
+```
+
+## 2016
+```{r}
+#load bands
+nir <- raster(here("./USGS Imagery/drought/LC08_L1TP_041036_20160926_20170220_01_T1_sr_band5.tif")) 
+red <- raster(here("./USGS Imagery/drought/LC08_L1TP_041036_20160926_20170220_01_T1_sr_band4.tif")) 
+#crs(nir)
+
+#clip
+nir_mask <- mask(nir, samo)
+red_mask <- mask(red, samo)
+#plot(nir_mask)
+
+#crop 
+nir_crop <- crop(nir_mask , extent(samo))
+red_crop <- crop(red_mask , extent(samo))
+#plot(nir_crop)
+
+#ndvi
+ndvi <- (nir_crop - red_crop) / (nir_crop + red_crop)
+#plot(ndvi)
+
+#save raster
+writeRaster(ndvi, filename = here("drought_indices_outputs", "ndvi_2016.tif"))
+```
+
+
+# test scale factor of landsat bands when used for evi
+
+```{r}
+
+nir <- raster::raster(here::here("./USGS Imagery/drought/2006_07/LT05_L1TP_041036_20060713_20160909_01_T1_sr_band4.tif")) * 0.0001
+red <- raster::raster(here::here("./USGS Imagery/drought/2006_07/LT05_L1TP_041036_20060713_20160909_01_T1_sr_band3.tif")) * 0.0001
+blue<- raster::raster(here::here("./USGS Imagery/drought/2006_07/LT05_L1TP_041036_20060713_20160909_01_T1_sr_band1.tif")) * 0.0001
+
+evi <- 2.5*((nir - red) / (nir + (6 * red) - (7.5 * blue) + 1))
+
+# save rasters
+writeRaster(evi, filename = "evi_testscale_0.0001.tif")
+
+```
+
+tested a range of scaling factors: 0.1, 0.01, 0.001, and 0.0001. 0.0001 gave me values that were under 1 while the other factors produced values >1. Additionally, the tif for the 0.0001 factor has many different colors while the other factors produced tifs with a single color. Plus this site mentions a scale factor of 0.0001 https://www.usgs.gov/land-resources/nli/landsat/landsat-enhanced-vegetation-index?qt-science_support_page_related_con=0#qt-science_support_page_related_con
+
+
+According to CHris, ndvi is not sensitive to scale factor but rdnbr also is. 
+
+
+########################## NPS FPL internship: barc #############################
+oaks_barc_orig <- read.csv(here::here("Data Sheets", "oak_mean_barc.csv")) %>% 
+  clean_names() %>% 
+  dplyr::rename_all(funs(str_replace(., "quag_qulo_wgs84_11n_", ""))) %>% 
+  select(fid_vegeta, class_snam, class_abbr, class_cnam, density, acres, contains("mean_barc_mean")) %>% 
+  rename_all(funs(str_replace(., "mean_barc_mean", "mean_barc"))) %>% 
+  select(-corral_mean_barc) 
+
+# read in burn severity files and combine into a single df
+
+Note: the fiels contain the average burn severity for a polygon (not for an individual pixel)
+```{r}
+
+# load files and make list of file names to be used later
+files <- list.files(path = 'C:/Users/amlpa/Documents/NPS_SAMO/amp_work/Fire Data/MTBS/burn_severity_means', 
+                    pattern = "*.xls", 
+                    full.names = T)
+
+filenames <- list.files(path = 'C:/Users/amlpa/Documents/NPS_SAMO/amp_work/Fire Data/MTBS/burn_severity_means',
+                        pattern = "*.xls", 
+                        full.names = F)
+
+## make the names a little nicer
+filenames_list <- ldply(strsplit(filenames, ".", fixed=T))$V1
+
+# stores individual tibbles of the data files in a list (you have already done this step)
+burn_all <- lapply(files, read_excel) 
+
+## loop through and add a column 
+
+for (i in 1:length(burn_all)) {
+  
+  # year = new column being added to each tsibble
+  burn_all[[i]]$burn <- filenames_list[i]
+  
+}
+
+## now bind files together
+oak_burn_untidy <- ldply(burn_all)
+
+
+## tidy oak_evi data frame
+oak_burn <- oak_burn_untidy %>% 
+  clean_names() %>% 
+  separate(burn, into = c("index", "fire_scar"), sep = '_') %>% 
+  mutate(fire_scar = case_when(
+    grepl("woo", fire_scar) ~ "Woolsey",
+    grepl("top", fire_scar) ~ "Topanga",
+    grepl("spr", fire_scar) ~ "Springs",
+    grepl("cor", fire_scar) ~ "Corral",
+    grepl("can", fire_scar) ~ "Canyon"
+  ))
+
+```
+use grepl to use mutate, case_when adn contains. word in () is the phrase being searched for and the column comes after. so kinda the opposite of the typical case_when set up
+
+###################################  burn severity bins for dnbr ################################## 
+oak_dnbr <- oak_burn %>% 
+  filter(index == "dnbr") %>% 
+  mutate(dnbr_burn_qualitative = case_when(
+    mean <= 41 ~ "None",
+    mean < 177 ~ "Low",
+    mean < 367 ~ "Moderate",
+    mean >= 367 ~ "High")) %>% 
+  mutate(dnbr_burn_qualitative = as.factor(dnbr_burn_qualitative),
+         dnbr_burn_qualitative = fct_relevel(dnbr_burn_qualitative, levels=c("None", "Low", "Moderate", "High")))
+
+################################### burn severity bins for rdnbr ################################## 
+oak_rdnbr <- oak_burn %>% 
+  filter(index == "rdnbr") %>% 
+  mutate(rdnbr_burn_qualitative = case_when(
+    mean <= 69 ~ "None",
+    mean <= 315 ~ "Low",
+    mean < 641 ~ "Moderate",
+    mean >= 641 ~ "High")) %>% 
+  mutate(rdnbr_burn_qualitative = as.factor(rdnbr_burn_qualitative),
+         rdnbr_burn_qualitative = fct_relevel(rdnbr_burn_qualitative, levels=c("None", "Low", "Moderate", "High")))
+
+
+########################## NPS FPL internship: burn severity sample code #############################
+
+
+#Packages
+```{r}
+library(tidyverse)
+library(raster)
+library(rgdal)
+```
+#RDNBR, RBR, and DNBR
+
+## samo boundary
+```{r}
+
+samo <- readOGR(here("SAMO Boundary", "SAMO_Boundary.shp"))
+samo <- spTransform(samo, CRS('+proj=utm +zone=11 +datum=WGS84 +units=m +no_defs'))
+```
+
+## woolsey
+```{r}
+#prefire ---------------------------------------------------------
+nir_pre <-  raster('./USGS Imagery/2005+_fires/2018_Nov03/LC08_L1TP_041036_20181103_20181115_01_T1_sr_band5.tif') / 10
+swir_pre <- raster('./USGS Imagery/2005+_fires/2018_Nov03/LC08_L1TP_041036_20181103_20181115_01_T1_sr_band7.tif') / 10
+
+##clip
+nir_mask <-  mask(nir_pre , samo)
+swir_mask <- mask(swir_pre , samo)
+
+##crop
+nir_crop <-  crop(nir_mask, samo)
+swir_crop <- crop(swir_mask, samo)
+
+##nbr
+nbr_prefire <- (nir_crop - swir_crop) / (nir_crop + swir_crop)
+#plot(nbr_prefire)
+
+# postfire ---------------------------------------------------------
+nir_post  <- raster('./USGS Imagery/2005+_fires/2019_Jan22/LC08_L1TP_041036_20190122_20190205_01_T1_sr_band5.tif') / 10
+swir_post <- raster('./USGS Imagery/2005+_fires/2019_Jan22/LC08_L1TP_041036_20190122_20190205_01_T1_sr_band7.tif') / 10
+
+##clip
+nir_mask <-  mask(nir_post , samo)
+swir_mask <- mask(swir_post , samo)
+
+##crop
+nir_crop <-  crop(nir_mask, samo)
+swir_crop <- crop(swir_mask, samo)
+
+##nbr
+nbr_postfire <- (nir_crop - swir_crop) / (nir_crop + swir_crop)
+#plot(nbr_postfire)
+
+# burn severity ---------------------------------------------------------
+##dnbr 
+dnbr <- nbr_prefire - nbr_postfire
+writeRaster(dnbr, filename = "woolsey_dnbr.tif", overwrite=T)
+
+##rdnbr
+rdnbr <- ( (nbr_prefire - nbr_postfire) / (sqrt(abs(nbr_prefire/1000))))
+writeRaster(rdnbr, filename = "woolsey_rdnbr.tif", overwrite=T)
+
+##rbr
+rbr <- ((dnbr) / (nbr_prefire + 1.001))
+writeRaster(rbr, filename = "woolsey_rbr.tif", overwrite=T)
+
+```
+
+
+chrsi says rdnbr is sensitive to scale factor (think it is a scale factor that needs to be rectified by multiplying bands by 0.0001). it could explain why the output raster is monochromatic whilel the dnbr raster is not
+
+#RdNBR, RBR, and dNBR
+
+no longer useing rbr. I do not like the threshold values for rbr. Even after a brief question to sean parks (the creator of rbr) i was not satisfied with their thresholds since they varied between papers. 
+
+*DO NOT TRUST RDNBR. Think it needs the scale factor applied (ie multiplying each band by 0.0001), which the code below is not set up to do* 
+  
+  samo boundary and Oak Stands
+```{r}
+samo <- readOGR(here("SAMO Boundary", "SAMO_Boundary.shp"))
+samo <- spTransform(samo, CRS('+proj=utm +zone=11 +datum=WGS84 +units=m +no_defs'))
+
+oak_stands <- readOGR(here("SAMO_oak_stands", "QUAG_QULO_WGS84_11N.shp"))
+oak_stands <- spTransform(oak_stands, CRS('+proj=utm +zone=11 +datum=WGS84 +units=m +no_defs'))
+
+topanga <- readOGR(here("SAMO main fire scars", "topanga_fire.shp"))
+topanga <- spTransform(topanga, CRS('+proj=utm +zone=11 +datum=WGS84 +units=m +no_defs'))
+
+springs <- readOGR(here("SAMO main fire scars", "springs_fire.shp"))
+springs <- spTransform(springs, CRS('+proj=utm +zone=11 +datum=WGS84 +units=m +no_defs'))
+
+corral <- readOGR(here("SAMO main fire scars", "corral_fire.shp"))
+corral <- spTransform(corral, CRS('+proj=utm +zone=11 +datum=WGS84 +units=m +no_defs'))
+
+oldfire <- readOGR(here("SAMO main fire scars", "oldfire_fire.shp"))
+oldfire <- spTransform(oldfire, CRS('+proj=utm +zone=11 +datum=WGS84 +units=m +no_defs'))
+
+woolsey <- readOGR(here("SAMO main fire scars", "woolsey_fire.shp"))
+woolsey <- spTransform(woolsey, CRS('+proj=utm +zone=11 +datum=WGS84 +units=m +no_defs'))
+
+
+```
+
+## Burn severity by fire scar
+
+###Topanga
+```{r}
+# clip oak stands to fire scar ---------------------------------------------------
+oak_clip <- gIntersection(topanga, oak_stands, byid = T)
+plot(oak_clip)
+
+#prefire ---------------------------------------------------------
+nir_pre <-  raster(here('./USGS Imagery/2005+_fires/2005_Aug27/LT05_L1TP_041036_20050827_20160912_01_T1_sr_band4.tif')) / 10
+swir_pre <- raster(here('./USGS Imagery/2005+_fires/2005_Aug27/LT05_L1TP_041036_20050827_20160912_01_T1_sr_band7.tif')) / 10
+
+##clip
+nir_mask <-  mask(nir_pre , oak_clip)
+swir_mask <- mask(swir_pre , oak_clip)
+
+##crop
+nir_crop <-  crop(nir_mask, oak_clip)
+swir_crop <- crop(swir_mask, oak_clip)
+plot(nir_crop)
+##nbr
+nbr_prefire <- (nir_crop - swir_crop) / (nir_crop + swir_crop)
+plot(nbr_prefire)
+
+# postfire ---------------------------------------------------------
+nir_post  <- raster(here('./USGS Imagery/2005+_fires/2005_Oct14/LT05_L1TP_041036_20051014_20160911_01_T1_sr_band4.tif')) / 10
+swir_post <- raster(here('./USGS Imagery/2005+_fires/2005_Oct14/LT05_L1TP_041036_20051014_20160911_01_T1_sr_band7.tif')) / 10
+
+##clip
+nir_mask <-  mask(nir_post, oak_clip)
+swir_mask <- mask(swir_post, oak_clip)
+
+##crop
+nir_crop <-  crop(nir_mask, oak_clip)
+swir_crop <- crop(swir_mask, oak_clip)
+
+##nbr
+nbr_postfire <- (nir_crop - swir_crop) / (nir_crop + swir_crop)
+#plot(nbr_postfire)
+
+# burn severity ---------------------------------------------------------
+##dnbr 
+dnbr <- nbr_prefire - nbr_postfire
+writeRaster(dnbr, filename = (here("burn_severity", "dnbr_topanga.tif")), overwrite=T)
+plot(dnbr)
+
+##rdnbr
+rdnbr <- ((dnbr*1000) / (sqrt(abs((nbr_prefire*1000)/1000))))
+writeRaster(rdnbr, filename = (here("burn_severity", "rdnbr_topanga.tif")), overwrite=T)
+
+##rbr
+rbr <- ((dnbr) / (nbr_prefire + 1.001))
+writeRaster(rbr, filename = (here("burn_severity", "rbr_topanga.tif")), overwrite=T)
+
+```
+
+dividing the incoming raster by 10 doesn't affect the output raster or its range of values
+
+
+
+
+
+### Springs
+```{r}
+#prefire ---------------------------------------------------------
+nir_pre <-  raster(here('./USGS Imagery/2005+_fires/2013_Apr27/LC08_L1TP_041036_20130427_20170310_01_T1_sr_band5.tif')) / 10
+swir_pre <- raster(here('./USGS Imagery/2005+_fires/2013_Apr27/LC08_L1TP_041036_20130427_20170310_01_T1_sr_band7.tif')) / 10
+
+##clip
+nir_mask <-  mask(nir_pre , samo)
+swir_mask <- mask(swir_pre , samo)
+
+##crop
+nir_crop <-  crop(nir_mask, samo)
+swir_crop <- crop(swir_mask, samo)
+
+##nbr
+nbr_prefire <- (nir_crop - swir_crop) / (nir_crop + swir_crop)
+#plot(nbr_prefire)
+
+# postfire ---------------------------------------------------------
+nir_post  <- raster(here('./USGS Imagery/2005+_fires/2013_May13/LC08_L1TP_041036_20130513_20170310_01_T1_sr_band5.tif')) / 10
+swir_post <- raster(here('./USGS Imagery/2005+_fires/2013_May13/LC08_L1TP_041036_20130513_20170310_01_T1_sr_band7.tif')) / 10
+
+##clip
+nir_mask <-  mask(nir_post , samo)
+swir_mask <- mask(swir_post , samo)
+
+##crop
+nir_crop <-  crop(nir_mask, samo)
+swir_crop <- crop(swir_mask, samo)
+
+##nbr
+nbr_postfire <- (nir_crop - swir_crop) / (nir_crop + swir_crop)
+#plot(nbr_postfire)
+
+# burn severity ---------------------------------------------------------
+##dnbr 
+dnbr <- nbr_prefire - nbr_postfire
+writeRaster(dnbr, filename = (here("burn_severity", "dnbr_springs.tif")), overwrite=T)
+
+##rdnbr
+rdnbr <- ((dnbr*1000) / (sqrt(abs((nbr_prefire*1000)/1000))))
+writeRaster(rdnbr, filename = (here("burn_severity", "rdnbr_springs.tif")), overwrite=T)
+
+##rbr
+rbr <- ((dnbr) / (nbr_prefire + 1.001))
+writeRaster(rbr, filename = (here("burn_severity", "rbr_springs.tif")), overwrite=T)
+
+```
+
+### Woolsey
+```{r}
+#prefire ---------------------------------------------------------
+nir_pre <-  raster(here('./USGS Imagery/2005+_fires/2018_Nov03/LC08_L1TP_041036_20181103_20181115_01_T1_sr_band5.tif')) / 10
+swir_pre <- raster(here('./USGS Imagery/2005+_fires/2018_Nov03/LC08_L1TP_041036_20181103_20181115_01_T1_sr_band7.tif')) / 10
+
+##clip
+nir_mask <-  mask(nir_pre , samo)
+swir_mask <- mask(swir_pre , samo)
+
+##crop
+nir_crop <-  crop(nir_mask, samo)
+swir_crop <- crop(swir_mask, samo)
+
+##nbr
+nbr_prefire <- (nir_crop - swir_crop) / (nir_crop + swir_crop)
+#plot(nbr_prefire)
+
+# postfire ---------------------------------------------------------
+nir_post  <- raster(here('./USGS Imagery/2005+_fires/2019_Jan22/LC08_L1TP_041036_20190122_20190205_01_T1_sr_band5.tif')) / 10
+swir_post <- raster(here('./USGS Imagery/2005+_fires/2019_Jan22/LC08_L1TP_041036_20190122_20190205_01_T1_sr_band7.tif')) / 10
+
+##clip
+nir_mask <-  mask(nir_post , samo)
+swir_mask <- mask(swir_post , samo)
+
+##crop
+nir_crop <-  crop(nir_mask, samo)
+swir_crop <- crop(swir_mask, samo)
+
+##nbr
+nbr_postfire <- (nir_crop - swir_crop) / (nir_crop + swir_crop)
+#plot(nbr_postfire)
+
+# burn severity ---------------------------------------------------------
+##dnbr 
+dnbr <- nbr_prefire - nbr_postfire
+writeRaster(dnbr, filename = (here("burn_severity", "dnbr_woolsey.tif")), overwrite=T)
+
+##rdnbr
+rdnbr <- ((dnbr*1000) / (sqrt(abs((nbr_prefire*1000)/1000))))
+writeRaster(rdnbr, filename = (here("burn_severity", "rdnbr_woolsey.tif")), overwrite=T)
+
+##rbr
+rbr <- ((dnbr) / (nbr_prefire + 1.001))
+writeRaster(rbr, filename = (here("burn_severity", "rbr_woolsey.tif")), overwrite=T)
+
+
+```
+
+## function for burn severity
+the function will clip the images to the oaks stands in the fire scar. Then calculate dnbr and rdnbr for the pixels in the stand. The code is not set up to calculate the average. Can do that in a separate script. It may be useful to have the raw burn severity images
+
+
+
+function
+```{r}
+
+burn_severity_fun <- function(fire_scar, nir_pre, swir_pre, nir_post, swir_post) {
+
+## clip oak stands to fire scar ------------------------------------
+
+oak_clip <- gIntersection(fire_scar, oak_stands, byid = T)
+
+## prefire ---------------------------------------------------------
+
+nir_mask_pre <-  mask(nir_pre , oak_clip)
+swir_mask_pre <- mask(swir_pre , oak_clip)
+
+#crop 
+nir_crop_pre <-  crop(nir_mask_pre, oak_clip)
+swir_crop_pre <- crop(swir_mask_pre, oak_clip)
+
+#nbr 
+nbr_prefire <- (nir_crop_pre - swir_crop_pre) / (nir_crop_pre + swir_crop_pre)
+#plot(nbr_prefire)
+## postfire ---------------------------------------------------------
+
+#clip
+nir_mask_post <-  mask(nir_post, oak_clip)
+swir_mask_post <- mask(swir_post, oak_clip)
+
+#crop
+nir_crop_post <-  crop(nir_mask_post, oak_clip)
+swir_crop_post <- crop(swir_mask_post, oak_clip)
+
+#nbr
+nbr_postfire <- (nir_crop_post - swir_crop_post) / (nir_crop_post + swir_crop_post)
+
+## burn severity ---------------------------------------------------------
+
+#dnbr 
+dnbr <- nbr_prefire - nbr_postfire
+writeRaster(dnbr, filename = (here("burn_severity", "dnbr.tif")), overwrite=T)
+
+#rdnbr
+rdnbr <- ((dnbr*1000) / (sqrt(abs((nbr_prefire*1000)/1000))))
+writeRaster(rdnbr, filename = (here("burn_severity", "rdnbr.tif")), overwrite=T)
+
+# #rbr
+# rbr <- ((dnbr) / (nbr_prefire + 1.001))
+# writeRaster(rbr, filename = (here("burn_severity", "rbr.tif")), overwrite=T)
+}
+
+```
+
+
+rasters for function. Select imagery and fire scar needed, hit run, then run burn_severity_fun function
+
+when using the function, need to comment out the different fires, so only the fire you want to run is seleced, the run the code chunk. tedious. 
+```{r}
+# #topanga
+# nir_pre   <- raster(here('./USGS Imagery/2005+_fires/2005_Aug27/LT05_L1TP_041036_20050827_20160912_01_T1_sr_band4.tif')) / 10
+# swir_pre  <- raster(here('./USGS Imagery/2005+_fires/2005_Aug27/LT05_L1TP_041036_20050827_20160912_01_T1_sr_band7.tif')) / 10
+# nir_post  <- raster(here('./USGS Imagery/2005+_fires/2005_Oct14/LT05_L1TP_041036_20051014_20160911_01_T1_sr_band4.tif')) / 10
+# swir_post <- raster(here('./USGS Imagery/2005+_fires/2005_Oct14/LT05_L1TP_041036_20051014_20160911_01_T1_sr_band7.tif')) / 10
+
+# #springs
+# nir_pre   <- raster(here('./USGS Imagery/2005+_fires/2013_Apr27/LC08_L1TP_041036_20130427_20170310_01_T1_sr_band5.tif')) / 10
+# swir_pre  <- raster(here('./USGS Imagery/2005+_fires/2013_Apr27/LC08_L1TP_041036_20130427_20170310_01_T1_sr_band7.tif')) / 10
+# nir_post  <- raster(here('./USGS Imagery/2005+_fires/2013_May13/LC08_L1TP_041036_20130513_20170310_01_T1_sr_band5.tif')) / 10
+# swir_post <- raster(here('./USGS Imagery/2005+_fires/2013_May13/LC08_L1TP_041036_20130513_20170310_01_T1_sr_band7.tif')) / 10
+# 
+#woolsey
+nir_pre   <- raster(here('./USGS Imagery/2005+_fires/2018_Nov03/LC08_L1TP_041036_20181103_20181115_01_T1_sr_band5.tif')) / 10
+swir_pre  <- raster(here('./USGS Imagery/2005+_fires/2018_Nov03/LC08_L1TP_041036_20181103_20181115_01_T1_sr_band7.tif')) / 10
+nir_post  <- raster(here('./USGS Imagery/2005+_fires/2019_Jan22/LC08_L1TP_041036_20190122_20190205_01_T1_sr_band5.tif')) / 10
+swir_post <- raster(here('./USGS Imagery/2005+_fires/2019_Jan22/LC08_L1TP_041036_20190122_20190205_01_T1_sr_band7.tif')) / 10
+
+# run function
+burn_severity_fun(fire_scar = woolsey,
+nir_pre = nir_pre,
+swir_pre = swir_pre,
+nir_post = nir_post, 
+swir_post = swir_post)
+
+
+#rename file
+setwd("C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/burn_severity")
+from <- c("dnbr.tif", 'rdnbr.tif', 'rbr.tif')
+
+#to <- c("dnbr_topanga.tif", 'rdnbr_topanga.tif', 'rbr_topanga.tif')
+#to <- c("dnbr_springs.tif", 'rdnbr_springs.tif', 'rbr_springs.tif')
+to <- c("dnbr_woolsey.tif", 'rdnbr_woolsey.tif', 'rbr_woolsey.tif')
+
+file.rename(from, to)
+```
+
+
+## calculate polygon mean
+```{r}
+dnbr_t <- raster(here("burn_severity", "dnbr_topanga.tif"))
+
+dnbr_mean <- raster::extract(dnbr_t, oak_stands, fun=mean, na.rm=T, sp = T)
+
+dnbr_df <- as.data.frame(dnbr_mean)
+
+```
+so this link says to ignore the warnings: https://stackoverflow.com/questions/24282550/no-non-missing-arguments-warning-when-using-min-or-max-in-reshape2
+
+sp =T parameter means to add the mean values back to the spatail df https://rdrr.io/cran/raster/man/extract.html
+
+##calculate multiple means 
+
+use this loop to calculate th polygon means from the dnbr and rdnbr images created above
+
+```{r}
+oak_stands_mod <- read_sf(dsn = here("SAMO_oak_stands"), layer = 'QUAG_QULO_WGS84_11N')  %>% 
+clean_names() %>% 
+select(fid_vegeta)
+
+folds <- list.files(path = "C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/burn_severity", full.names=T)
+
+burn_list <- list()
+```
+
+```{r}
+for (i in 1:length(folds)){
+
+rast <- raster(folds[i])
+
+burn_mean <- suppressWarnings(raster::extract(rast, oak_stands_mod, fun=mean, na.rm=T, sp = T))
+
+burn_list[[i]] <- burn_mean
+
+}
+
+df <- as.data.frame(burn_list) 
+
+burn_severity_df <- df %>% 
+select(-contains('vegeta.')) 
+
+```
+
+explore dnbr and rdnbr
+```{r}
+ggplot(burn_severity_df, aes(x = dnbr_topanga, y= rdnbr_topanga)) +
+geom_point()
+
+ggplot(burn_severity_df, aes(x = dnbr_woolsey, y= rdnbr_woolsey)) +
+geom_point()
+
+ggplot(burn_severity_df, aes(x = dnbr_springs, y= rdnbr_springs)) +
+geom_point()
+```
+woolsey fire looks good. springs and topanaga fire has those moderate dnbr values recorded as high rdnbr, so dnbr may be a better estimate.  
+
+
+
+read in multiple rasters from several files - trying to create loop to calculate dnbr and rdnbr without needing to use a function and always preselect imagery/parameters. But looking at chris' imagery he created a loop to calculate nbr and had a separate code to batch process dnbr/rdnbr
+```{r}
+
+sub <- list.dirs(path = "C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/USGS Imagery/2005+_fires",
+                 full.names = T, 
+                 recursive = F)
+
+nir_bands_45_list <- list()
+nir_bands_8_list <- list()
+swir_bands_list <- list()
+
+for (i in 1:length(sub)){
+  #print(sub[i])
+  
+  #landsat 4-5 nir bands
+  nir_bands_45 <- list.files(path=sub[i], recursive=TRUE, full.names=F,  pattern=glob2rx('*LT05*band4*'))
+  
+  #landsat 8 nir bands
+  nir_bands_8 <- list.files(path=sub[i], recursive=TRUE, full.names=F,  pattern=glob2rx('*LC08*band5*'))
+  
+  #landsat 4-5 and 8 swir bands
+  swir_bands <- list.files(path=sub[i], recursive=TRUE, full.names=F,  pattern='band7')
+  
+  
+  print(nir_bands_45)
+  print(nir_bands_8)
+  print(swir_bands)
+  
+  nir_bands_45_list[[i]] <- nir_bands_45
+  nir_bands_8_list[[i]] <- nir_bands_8
+  swir_bands_list[[i]] <- swir_bands
+  
+  all_bands <- rbind(nir_bands_45_list, nir_bands_8_list, swir_bands_list)
+}
+
+#stuck on how to call the files from all_bands
+
+
+```
+use glob2rx to search for multiple patterns 
+
+##produce nbr files for all imagery. 
+```{r}
+folds <- list.files(path = "C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/USGS Imagery/2005+_fires", full.names=T)
+folds.nms <- list.files(path = "C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/USGS Imagery/2005+_fires", full.names=F)
+
+
+burn_severity_outputs <- list()
+
+for (i in 1:length(folds)) {
+  
+  ## get file names
+  nir.nm <- list.files(folds[i], pattern="band4", full.names = T)
+  nir <- raster(nir.nm)
+  swir.nm <- list.files(folds[i], pattern="band7", full.names = T)
+  swir <- raster(swir.nm)
+  
+  ## clip
+  nir_mask <-  mask(nir, samo)
+  swir_mask <- mask(swir, samo)
+  #plot(nir_mask)
+  
+  ##crop 
+  nir_crop <- crop(nir_mask , extent(samo))
+  swir_crop <- crop(swir_mask , extent(samo))
+  #plot(nir_crop)
+  
+  ##ndvi
+  nbr <- (nir_crop - swir_crop) / (nir_crop + swir_crop)
+  #plot(ndvi)
+  
+  burn_severity_outputs[[i]] <- nbr
+  
+  writeRaster(nbr, filename = paste0(folds.nms[i], "_nbr.tif"))
+}
+
+
+```
+########################## NPS FPL internship: Drought Stress Predictions #############################
+
+
+*This code analyzes if evi response during a short drought is indicative of how that pixel will respond to a more severe drought.*
+  
+  #packages
+  ```{r}
+library(tidyverse)
+library(here)
+library(readxl)
+```
+
+# load data
+```{r}
+# manual classification of pixels into dieback categories. See meta data for description
+dieback <- read_excel(here::here("Data Sheets", 'evi_pixel_dieback_verification_data.xlsx')) %>% 
+  #mutate(pointid = as.character(pointid)) %>% 
+  dplyr::select(pointid, notes,location)
+
+# monthly evi values from 2004-2020
+evi_rtp_test <- read.csv(here::here("Data Sheets", "evi_monthly_rtp.csv")) %>% 
+  mutate(date = as.Date(date))
+
+evi_dieback <- inner_join(evi_rtp_test, dieback, by = 'pointid')
+
+```
+
+
+# past drought stress a predictor of future drought stress?
+
+I noticed the average evi for pixels with and without dieback had a different responses to the 2006/7 drought. Those with no dieback after the 2011-2018 drought on average had a higher EVI during the 2006/7 drought and those with dieback after the 2011-2018 drought on average had a lower EVIduring the 2006/7 drought. So this code chunk looks at how oaks responded to past drought to see how they did during the 2011-2018 mega drought and see if reaction to past droughts can predict how oaks will respond to future more severe droughts. 
+```{r}
+# sub data
+evi_change_2006_drought <- evi_dieback %>% 
+  mutate(dieback = case_when(
+    notes == "moderate/high dieback" ~ "Moderate Dieback",
+    notes == "high canopy dieback" ~ "High  Dieback",
+    notes %in% c("green in 2018", "mixed green and brown", "full canopy, slightly brown in 2018, cmpletely green 2019", "full canopy, slightly brown in 2018, cmpletely green 2019, part of the pixel has bare ground/annual grass") ~ "No Dieback"
+  )) %>% 
+  mutate(dieback = fct_relevel(dieback, levels = c("No Dieback", "Moderate Dieback", "High Dieback"))) %>% 
+  filter(dieback != "Moderate Dieback") %>% 
+  filter(year_month %in% c('2006_07', "2006_12")) %>% # july adn december had the peak and lowest evi
+  dplyr::select(year_month, evi, pointid,dieback) %>% 
+  mutate(year_month = case_when(
+    year_month =='2006_07' ~ "July_2006",
+    year_month =='2006_12' ~ "Dec_2006"
+  )) %>% 
+  pivot_wider(names_from = year_month, 
+              values_from = evi) %>% 
+  dplyr::mutate(evi_change = July_2006 - Dec_2006)
+
+# plot
+ggplot(evi_change_2006_drought, aes(x = dieback, y = evi_change)) +
+  geom_boxplot() +
+  labs(y = "Change EVI July 2006 from December 2006", x = "", title = "2006/2007 Drought Change in EVI") +
+  theme_bw()
+
+# stat test 
+t.test(evi_change ~ dieback, data = evi_change_2006_drought)
+
+######## combine modeerate and full ##########
+# since many of the pixels labeled as "moderate" actually seem to have high dieback join the two groups and rerun the analysis
+
+# sub data
+evi_change_2006_drought2 <- evi_dieback %>% 
+  mutate(year_month = str_remove(year_month, pattern = "_evi")) %>% 
+  mutate(dieback = case_when(
+    notes %in% c("moderate/high dieback", "high canopy dieback" ) ~ "High Dieback",
+    notes %in% c("green in 2018", "mixed green and brown", "full canopy, slightly brown in 2018, cmpletely green 2019", "full canopy, slightly brown in 2018, cmpletely green 2019, part of the pixel has bare ground/annual grass") ~ "No Dieback"
+  )) %>% 
+  mutate(dieback = fct_relevel(dieback, levels = c("No Dieback", "High Dieback"))) %>%
+  filter(year_month %in% c('2006_07', "2006_12")) %>% 
+  dplyr::select(year_month, evi, pointid,dieback) %>% 
+  mutate(year_month = case_when(
+    year_month =='2006_07' ~ "July_2006",
+    year_month =='2006_12' ~ "Dec_2006"
+  )) %>% 
+  pivot_wider(names_from = year_month, 
+              values_from = evi) %>% 
+  dplyr::mutate(evi_change = July_2006 - Dec_2006)
+
+# plot
+ggplot(evi_change_2006_drought2, aes(x = dieback, y = evi_change)) +
+  geom_boxplot() +
+  labs(y = "Change EVI July 2006 from December 2006", x = "", title = "2006/2007 Drought Change in EVI : Cmbined Classes") +
+  theme_bw()
+
+#stat test
+t.test(evi_change ~ dieback, data = evi_change_2006_drought2)
+
+
+########################## NPS FPL internship: drought indices #############################
+
+# tidy data
+pdsi_pivot <- pdsi %>% 
+  pivot_longer("Jan":"Dec",
+               names_to = "month",
+               values_to = "pdsi") %>% 
+  mutate(drought_scale = case_when(
+    pdsi <= -4 ~ "Extreme",
+    pdsi <= -3 ~ "Severe",
+    pdsi <= -2 ~ "Moderate",
+    pdsi <= 1.99 ~ 'Mid-Range',
+    pdsi <= 2.99 ~ "Moderate Moist",
+    pdsi <= 3.99 ~ "Very Moist",
+    pdsi >= 4 ~ "Extremely Moist"
+  )) %>% 
+  dplyr::select(-County) %>% 
+  mutate(month = str_to_title(month),
+         month = fct_relevel(month, levels=month.abb),
+         year = as.character(year),
+         day = '01') %>% 
+  unite(date, c("year", "month", "day"), sep="", remove=F) %>% 
+  # mutate(date = as.Date(date, format = '%Y%b')) %>% #this wouldnt work. kept getting errors as i tried to gfet the df to recognize the date column as a date, it only worked whn i added i put it in y-m-d format, so had to create a 'date', so a default day of "01" was randomly choosen
+  mutate(date = lubridate::ymd(date)) %>% 
+  filter(pdsi != -9999) # only values with NA are the later 2020 months
+
+
+#plot
+ggplot(pdsi_pivot, aes(x = date, y = pdsi)) +
+  geom_point() +
+  geom_line() +
+  geom_vline(xintercept = as.numeric(as.Date('2005-09-01')), linetype = 1) + #topanga (09/2005)
+  geom_vline(xintercept = as.numeric(as.Date('2007-10-01')), linetype = 1) + #canyon (10/2007)
+  geom_vline(xintercept = as.numeric(as.Date('2007-11-01')), linetype = 1) + #corral (11/2007)
+  geom_vline(xintercept = as.numeric(as.Date('2013-05-01')), linetype = 1) + #springs (05/2013)
+  geom_vline(xintercept = as.numeric(as.Date('2013-08-01')), linetype = 1) + #old fire (08/2013)
+  geom_vline(xintercept = as.numeric(as.Date('2016-09-01')), linetype = 1) + #old fire (06/2016)
+  geom_vline(xintercept = as.numeric(as.Date('2018-11-01')), linetype = 1) + #woolsey (11/2018)
+  # geom_hline(yintercept = 4, linetype = 2) +
+  geom_hline(yintercept = -1.99, linetype = 2) + # line indicating drought
+  labs (title = "Monthly SAMO Drought", subtitle = "January 1998 - June 2020", 
+        x = "\nYear", y = "Palmer Drought Severity Index (PDSI)\n") +
+  scale_x_date(date_labels = "%Y", 
+               date_breaks = "1 year", 
+               limits = as.Date(c('1998-01-01', '2020-06-01')),
+               expand = c(0, 0)) + 
+  geom_rect(xmin = as.numeric(as.Date('2011-12-01')), 
+            xmax = as.numeric(as.Date('2018-09-01')), 
+            ymin = -10, 
+            ymax = Inf,
+            fill = "brown1",
+            alpha = 0.005) + # severe CA drought years
+  geom_rect(xmin = as.numeric(as.Date('2006-05-01')),
+            xmax = as.numeric(as.Date('2007-07-01')),
+            ymin = -10,
+            ymax = Inf,
+            fill = "brown1",
+            alpha = 0.005) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 9)) +
+  scale_y_continuous(breaks = seq(-8, 10, by = 2))
+
+########################## NPS FPL internship: laandscale dieback assessment #############################
+
+# Packages
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(janitor)
+library(readxl)
+
+```
+
+# Load data
+```{r}
+# baseline evi values
+baseline_evi <- read.csv(here::here("Data Sheets", "evi_baseline.csv"))
+
+# jsut need this df for the pixel geometries
+evi_2004 <- read_sf(dsn = here::here("Arc Layers"), layer = "evi_2004_rtp")
+
+# evi values
+evi <- read.csv(here::here('Data Sheets', "evi_monthly_rtp.csv")) 
+
+# read in fire overlap for the oak pixels
+fire <- read_sf(here::here('Arc Layers', "oak_pixel_fire_overlap.shp")) %>% 
+  clean_names() %>% 
+  dplyr::select(pointid, fire_name, year) %>% 
+  st_drop_geometry()
+
+```
+
+# create sub data
+
+only want pixels that have been unburned since upto end of 2016. Even though dieback was quantified using 2018 imagery, 2016 is the year being used to classify dieback. 
+
+```{r}
+# join fire df to include pixels that have not burned since 2005 (fire df only contains pixels that have burned from 2005-2018, so missing some pixels)
+
+# use one month from evi to get all pointid's
+evi_temp <- evi %>%
+  filter(year_month == "2004_01") %>%
+  dplyr::select(pointid)
+
+# join df above with fire df
+fire_all <- full_join(fire, evi_temp, by = "pointid")
+
+#keep unburned pixels and only pixels burned in the woolsey fire since im using 2016 evi for the dieback threshold
+fire_filtered <- fire_all %>% 
+  mutate(fire_name = replace_na(fire_name, "unburned")) %>% 
+  group_by(pointid) %>% 
+  dplyr::summarise(fire_name = paste(fire_name, collapse = ";")) %>% 
+  filter(fire_name %in% c("WOOLSEY", "STOKES", "unburned"))  # only keep fires that occured after 2016
+
+# join evi and fire data
+evi_fire <- inner_join(fire_filtered, evi, by = "pointid")
+
+```
+
+
+
+# Implement thresholds across the landscape
+
+step 1 = remove burned pixels from 2005-2016
+step 2 = apply pixel removal threshold to remove non oak dominated pixels
+step 3 = apply the dieback threshold to classify pixels as having either high or no dieback
+
+```{r}
+
+# apply pixel removal thresholds
+threshold_pixel_removal_df <- evi_fire %>% 
+  filter(year %in% c("2004", "2016")) %>% 
+  dplyr::select(-month, -year, -date) %>%
+  pivot_wider(names_from = year_month, # set up df to easily calculate change in evi
+              values_from = evi) %>% 
+  clean_names() %>% 
+  mutate(change_evi = x2004_12 - x2004_10) %>% 
+  filter(x2004_09 >= 0.18) %>% 
+  filter(change_evi <= 0.115) %>% 
+  pivot_longer("x2004_01":"x2016_11",
+               names_to = "year_month",
+               values_to = "evi") %>%
+  mutate(year_month = str_remove(year_month, pattern = "x"))
+
+# calculate mean summer evi in 2016
+threshold_df_2016 <- threshold_pixel_removal_df %>% 
+  separate(year_month, into = c("year", "month"), remove=F) %>% 
+  filter(year == "2016") %>% 
+  filter(month %in% c("08", "09", "10")) %>% # there is no oct data for 2016
+  group_by(pointid, year) %>% 
+  dplyr::summarise(mean_summer = mean(evi))
+
+# calculate mean and SD from baseline summer EVI (using data from 2000-2004)
+baseline <- baseline_evi %>% 
+  group_by(pointid) %>% 
+  dplyr::summarise(mean_baseline = mean(evi),
+                   sd_baseline = sd(evi)) %>% 
+  mutate(pointid = as.numeric(pointid))
+
+# combine baseline values with mean summer 2016 to calculate the z score
+threshold_join <- inner_join(threshold_df_2016, baseline, by = "pointid")
+
+# calculate evi z score
+threshold_evi_z <- threshold_join %>% 
+  dplyr::summarise(evi_z = (mean_summer - mean_baseline)/sd_baseline)
+
+# apply different thresholds to classify the pixels
+threshold_dieback_classification <- threshold_evi_z %>% 
+  mutate(threshold_0.95 = case_when(  
+    evi_z <= -0.947 ~ "High Dieback",
+    TRUE ~ "No Dieback")) %>% 
+  mutate(threshold_0.90 = case_when(
+    evi_z <= -0.705 ~ "High Dieback",
+    TRUE ~ "No Dieback")) %>%
+  mutate(threshold_0.85 = case_when(
+    evi_z <= -0.555 ~ "High Dieback",
+    TRUE ~ "No Dieback")) %>%
+  mutate(threshold_0.80 = case_when(
+    evi_z <= -0.444 ~ "High Dieback",
+    TRUE ~ "No Dieback")) %>%
+  mutate(threshold_0.75 = case_when(
+    evi_z <= -0.353 ~ "High Dieback",
+    TRUE ~ "No Dieback")) %>%
+  mutate(threshold_0.70 = case_when(
+    evi_z <= -0.268 ~ "High Dieback",
+    TRUE ~ "No Dieback")) %>%
+  mutate(threshold_0.65 = case_when(
+    evi_z <= -0.197 ~ "High Dieback",
+    TRUE ~ "No Dieback")) %>%
+  mutate(threshold_0.60 = case_when(
+    evi_z <= -0.127 ~ "High Dieback",
+    TRUE ~ "No Dieback")) %>%
+  mutate(threshold_0.55 = case_when(
+    evi_z <= -0.061 ~ "High Dieback",
+    TRUE ~ "No Dieback")) %>%
+  mutate(threshold_0.50 = case_when(
+    evi_z <= 0.004 ~ "High Dieback",
+    TRUE ~ "No Dieback")) %>% 
+  pivot_longer(threshold_0.95:threshold_0.50,       
+               names_to = "threshold_probability",
+               values_to = "dieback_assessment")
+
+```
+
+total number of pixels in oak polygons: 36,075
+remove all pixels burned from 2005-2016: 6,873 (19.1%) pixels removed. 29,202 pixels remaining 
+pixel removal thresholds: 8,973 (30.7%) reamining pixels removed. 20,229 pixels remaining to be assessed for dieback
+- pixel removal threshold 1:6,851 (23.5%) reamining pixels removed.
+- pixel removal threshold 2: 2,122 (7.3%) reamining pixels removed.
+
+# Count acres classified as High Dieback/No Dieback
+```{r}
+# count number of pixels in each dieback class and convert pixels to acres
+threshold_classification_count <- threshold_dieback_classification%>% 
+  group_by(threshold_probability, dieback_assessment) %>% 
+  dplyr::count() %>%                                 
+  mutate(meter_sq = n*900,                           
+         acres = meter_sq/4047)
+
+# pivot data for easier mapping in arc
+threshold_pivot <- threshold_dieback_classification %>% 
+  # mutate(threshold_probability = replace_na(threshold_probability, "Burned")) %>% 
+  #mutate(dieback_assessment = replace_na(dieback_assessment, "Burned")) %>% 
+  pivot_wider(names_from = threshold_probability,
+              values_from = dieback_assessment)
+
+# pick random month just to get a df with geometries for each pixel one time
+threshold_geo <- evi_2004 %>% 
+  filter(year_month == "2004_01")  %>%  
+  dplyr::select(pointid) 
+
+# join df
+threshold_final <- full_join(threshold_geo, threshold_pivot, by = "pointid")
+threshold_final[is.na(threshold_final)] <- "Burned" # replace all NA values in the df with "Burned"
+
+########################## NPS FPL internship: drought indices #############################
+
+# tidy up the validation data 
+```{r}
+# tidy
+validation_tidy <- validation %>% 
+  separate(class, into = c("first", "second"), sep = ", ", remove=F, fill="right") %>% 
+  separate(first, into = c('first', "second2"), sep = ":", remove = T, fill = "right") %>% 
+  mutate(dominant_class_simplififed = case_when(
+    first %in% c("oak", "oaks") ~ "Oak",
+    TRUE ~ "Other")) %>% 
+  unite(second, c("second", "second2"), remove = T, sep= ", ")
+
+# sample size 
+validation_n <- validation_tidy %>% 
+  group_by(dominant_class_simplififed) %>% 
+  count() # oak = 209, other = 151
+
+```
+
+# join validation with df with all 2004 pixel evi values
+```{r}
+# combine validation data with df with all 2004 pixel evi values 
+validation_2004all <- inner_join(validation_tidy, evi_2004, by = "pointid")
+
+# tidy df
+validation_2004all_tidy <- validation_2004all %>% 
+  mutate(dominant_class = case_when(
+    first %in% c("oak", "oaks") ~ "Oak",
+    grepl("annual", first) ~ "Annual Grass",
+    grepl("grass", first) ~ "Annual Grass",
+    grepl("chap", first) ~ "Chaparral",
+    grepl("sage scrub", first) ~ "Sage Scrub",
+    first == "rock" ~ "Rock",
+    first =="mix" ~ "Mix")) %>% 
+  filter (evi > 0 & evi < 1) # got a couple weird outliers, so removing them
+
+# visualize the data
+ggplot(validation_2004all_tidy, aes(x = month, y = evi, group = pointid)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~dominant_class) +
+  labs(x = "Month", y = "EVI", title = "Monthly 2004 EVI for Threshold Validation Data") +
+  theme_bw() +
+  scale_x_discrete(expand = c(0,0)) +
+  theme(panel.spacing = unit(1, "lines"))
+
+```
+########################## NPS FPL internship: drought indices #############################
+
+evi_rtp_test$date <- as.Date(evi_rtp_test$date, format = "%Y-%m-%d")
+
+#just compare 3 pixels of different canopy types/dieback
+evi_rtp_test1 <- evi_dieback %>% 
+  filter(pointid  %in% c("23240", "22093", "22629")) %>% 
+  mutate(pointid = as.character(pointid))
+
+ggplot(evi_rtp_test1, aes(x = date, y = evi, group = pointid)) +
+  geom_point(aes(color = pointid)) +
+  geom_line(aes(color = pointid)) +
+  scale_x_date(date_labels = "%Y", 
+               date_breaks = "1 year", 
+               limits = as.Date(c('2004-01-01', '2020-06-01')),
+               expand = c(0, 0)) +
+  scale_color_discrete(name = "Canopy Health", 
+                       labels = c("2018 Brown Canopy: Pixel 22093", 
+                                  "2018 Green Canopy: Pixel 22629", 
+                                  "Oak Dieback: Pixel 23238"))
+
+########################## NPS FPL internship: prelim_exploratory_code #############################
+
+#packages
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(janitor)
+library(dplyr)
+library(scales)
+library(kableExtra)
+```
+
+# load data
+
+see Master Arc Layer List for how these these layers were created. 
+```{r}
+
+oak_fire <- read_sf(dsn=here::here("Arc Layers", 'oak_fire_spatial_join'), layer = 'oak_fire_spatial_join') %>% 
+  clean_names()
+oak_fire2 <- read_sf(dsn=here::here("Arc Layers", 'oak_fire_spatial_join'), layer = 'oak_fire_spatial_join2') %>% 
+  clean_names()
+
+oak_fire2005 <- read_sf(dsn=here::here("Arc Layers", 'oak_fire_spatial_join'), layer = 'oak_fire2005all_spatial_join') %>% 
+  clean_names()
+oak_fire2005_2 <- read_sf(dsn=here::here("Arc Layers", 'oak_fire_spatial_join'), layer = 'oak_fire2005all_spatial_join2') %>% 
+  clean_names()
+
+oak_fire2005main_2 <- read_sf(dsn=here::here("Arc Layers", 'oak_fire_spatial_join'), layer = 'oak_fire2005main_spatial_join2') %>% 
+  clean_names()
+
+fire_history_samo <- read_sf(dsn=here::here("Arc Layers", 'SAMO_frap_dissolve'), layer = 'SAMO_intersect_dissolve') %>% 
+  clean_names()
+
+oak_og <- read_sf(dsn = here::here("Arc Layers", "SAMO_oak_stands"), layer = "QUAG_QULO") %>% 
+  clean_names() %>% 
+  st_transform(26911)
+```
+
+
+#Create data frame for ALL fires that have occured in oak stands in recorded history
+
+this code chunk combines oak_fire and oak_fire2 into a single data frame. Duplicate rows were removed and some columns were modified or added to aid in making a master data sheet
+```{r}
+
+# combine fire year and name into a single column (for repeating fid_vegata) 
+oak_fire_aggregate <- oak_fire %>% 
+  dplyr::select(fid_vegeta, year, fire_name) %>% 
+  filter(!is.na(year)) %>% 
+  st_drop_geometry() %>% 
+  mutate(fire_name = str_to_title(fire_name)) %>% 
+  mutate(year = as.numeric(year)) %>% 
+  arrange(year) %>% 
+  group_by(fid_vegeta) %>% 
+  dplyr::summarise(years = paste(year, collapse = ";"),
+                   fires = paste(fire_name, collapse = ";"))
+
+# make df with just the join_count column
+fire_overlap <- oak_fire2 %>% 
+  dplyr::select(fid_vegeta, join_count)
+
+
+#calculate TSLF (time since last fire). Note some rows will have NA values. This will be rectified later
+oak_fire_tslf <- oak_fire %>% 
+  mutate(year = as.numeric(year)) %>% 
+  st_drop_geometry() %>% 
+  group_by(fid_vegeta) %>% 
+  dplyr::summarise(last_fire_year = max(year),
+                   tslf_2018 = 2018-last_fire_year)
+
+# create df for determining the last fire in a stand. Then join later with another df. There's probably an easier way to do this, but this works nonetheless
+oak_fire_last_fire <- oak_fire %>% 
+  mutate(year = as.numeric(year)) %>% 
+  mutate(fire_name = str_to_title(fire_name)) %>% 
+  dplyr::select(fid_vegeta, year, fire_name) %>% 
+  st_drop_geometry() %>% 
+  group_by(fid_vegeta) %>% 
+  dplyr::mutate(last_fire_year = max(year),
+                match = (last_fire_year - year)) %>% 
+  filter(match == 0) %>% 
+  dplyr::select(fid_vegeta, fire_name) %>% 
+  dplyr::rename(last_fire = fire_name)
+
+#combine the above data frames: can use join_all from the plyr package, but then that package messes with commonly used functions from the dplyr package (like summarize), so its easier to do multiple joins than put dplyr:: in front of all the other functions
+oak_fire_final_temporary1 <- full_join(oak_fire_aggregate, fire_overlap, by = "fid_vegeta")
+oak_fire_final_temporary2 <- inner_join(oak_fire_final_temporary1, oak_fire_tslf, by = "fid_vegeta") 
+oak_fire_final <- full_join(oak_fire_final_temporary2, oak_fire_last_fire, by = 'fid_vegeta') 
+
+```
+
+# oak_fire_history data frame
+
+added some more info to the oak_fire_final df that marti suggested 
+
+- parse out the fires and fire years
+- add fri
+- replaced NA values in TSLF and last fire year column. Used the year 1908 as the TSLF for fires that had no fire in recorded history (Safford and Van de Water 2014):
+  
+  "Any polygon that had not had a fire since prior to 1908 was assigned a default TSLF value of 103 years; in many cases, TSLF will thus be a conservative measure of the time since last burn. Current FRI was calculated by dividing the number of years in the fire record (i.e., 2010–1908 = 103 years inclusive) by the number of fires occurring in each polygon (according to the Fire Perimeters database) plus one (current FRI = 103/number of times burned + 1)". 
+
+While Safford and van de Water (2014) used a TSLF of 103 for areas unburned in recorded history, I used 111 (2018 - 1908 + years inclusive). While this project/data frame was created in 2020, the Cal FRAP fire perimeter data frame only contained fires from 2018. 
+
+```{r}
+# tidy up data frame and add in Marti's suggestions
+oak_fire_final_additions <- oak_fire_final  %>% 
+  dplyr::rename(historic_fires = fires) %>% 
+  dplyr::rename(historic_fire_years = years) %>% 
+  mutate(tslf_2018 = replace_na(tslf_2018, 111)) %>% 
+  mutate(avg_fri =(111/(join_count+1))) %>% 
+  mutate(last_fire_year = replace_na(last_fire_year, 1908)) %>% 
+  separate(historic_fire_years, into = c("first_fire_year", "second_fire_year", "third_fire_year", 
+                                         "fourth_fire_year", "fifth_fire_year", "sixth_fire_year",
+                                         "seventh_fire_year", "eighth_fire_year", "ninth_fire_year", "tenth_fire_year"), 
+           sep =";", fill="right", remove = F) %>% 
+  separate(historic_fires, into = c("first_fire", "second_fire", "third_fire", 
+                                    "fourth_fire", "fifth_fire", "sixth_fire",
+                                    "seventh_fire", "eighth_fire", "ninth_fire", "tenth_fire"), 
+           sep =";", fill="right", remove =F) %>% 
+  dplyr::rename(num_fire_overlap = join_count) %>% 
+  mutate(first_fire_year = as.numeric(first_fire_year),
+         second_fire_year = as.numeric(second_fire_year),
+         third_fire_year = as.numeric(third_fire_year),
+         fourth_fire_year = as.numeric(fourth_fire_year),
+         fifth_fire_year = as.numeric(fifth_fire_year),
+         sixth_fire_year = as.numeric(sixth_fire_year),
+         seventh_fire_year = as.numeric(seventh_fire_year),
+         eighth_fire_year = as.numeric(eighth_fire_year),
+         ninth_fire_year = as.numeric(ninth_fire_year),
+         tenth_fire_year = as.numeric(tenth_fire_year)) %>% 
+  mutate(fri_1_2 = second_fire_year - first_fire_year,
+         fri_2_3 = third_fire_year - second_fire_year,
+         fri_3_4 = fourth_fire_year - third_fire_year,
+         fri_4_5 = fifth_fire_year - fourth_fire_year,
+         fri_5_6 = sixth_fire_year - fifth_fire_year,
+         fri_6_7 = seventh_fire_year - sixth_fire_year,
+         fri_7_8 = eighth_fire_year - seventh_fire_year,
+         fri_8_9 = ninth_fire_year - eighth_fire_year,
+         fri_9_10 = tenth_fire_year - ninth_fire_year) %>% 
+  mutate(fri_1_2 = replace_na(fri_1_2, 111)) %>% 
+  st_as_sf() # make df recognizable as class sf
+
+# use the above df to calculate min and max FRI
+oak_fire_final_additions_pivot <- oak_fire_final_additions %>% 
+  pivot_longer("fri_1_2":"fri_9_10",
+               names_to = "fri_temp",
+               values_to = "value") %>% 
+  filter(!is.na(value)) %>% 
+  group_by(fid_vegeta) %>% 
+  dplyr::summarise(fri_min = min(value),
+                   fri_max = max(value))
+
+# combine the two data frames
+oak_fire_history <- full_join(oak_fire_final_additions, oak_fire_final_additions_pivot, by = "fid_vegeta")
+
+# remove geometry column because when converting to csv bc it messes with the entire df
+oak_fire_history_no_geo <- oak_fire_history %>% st_drop_geometry() 
+
+# export the final oakfire history df as an excel sheet as an an ArcGIS shapefile
+#st_write(oak_fire_history, "oak_fire_history.shp", driver = "ESRI Shapefile")
+#write.csv(oak_fire_history_no_geo, "oak_fire_history.csv", row.names = F)
+
+```
+this link https://github.com/r-spatial/sf/issues/464 suggests that when exporting a df in r to an arcgis shapefile, the column headers will be automatically shortened. Just another reason arc is annoying. 
+
+
+
+#summary number of oak stand with X number of fires in recorded history
+```{r}
+# count overlapping fires per oak polygon
+oak_fire_count <- oak_fire_final %>% 
+  group_by(join_count) %>% 
+  dplyr::count()
+
+# count number acres burned for each join_count
+oak_acres_num_fire <- oak_fire2 %>% 
+  group_by(join_count) %>% 
+  dplyr::summarise(acres_num_fire = sum(acres))  %>% 
+  st_drop_geometry()
+
+# join dfs above
+oak_fire_summary <- inner_join(oak_fire_count, oak_acres_num_fire, by = "join_count")
+
+# make table
+oak_fire_summary %>% 
+  kable(col.names = c("Number Historic Fires", "Count", "Acres Burned"), align = "c", booktabs = T, digits = 2, format.args = list(big.mark = ",", scientific = FALSE)) %>% 
+  kable_styling(bootstrap_options = c("striped", "responsive"), 
+                full_width = F,
+                position = "center") 
+
+# find mean and median # of fires
+oak_fire_count_summary <- oak_fire_final %>% 
+  summarise(mean_fires = mean(join_count),
+            median_fires = median(join_count))
+```
+
+
+#create data frame for all fires that have occurred in oak stands >=2005
+
+creatr similar data frame as the above oak_fire_final data frame but just using data on fires that occured >=2005. This cut off was suggested by Marti. 
+```{r}
+# combine fire year and name into a single row (for repeating fid_vegata) 
+oak_fire_aggregate2005 <- oak_fire2005 %>% 
+  dplyr::select(fid_vegeta, year, fire_name) %>% 
+  mutate(fire_name = str_to_title(fire_name)) %>% 
+  mutate(year = replace_na(year, "No fire since 2004")) %>% 
+  mutate(fire_name = replace_na(fire_name, "No fire since 2004")) %>% 
+  group_by(fid_vegeta) %>% 
+  dplyr::summarise(years_2005 = paste(year, collapse = ";"),
+                   fires_2005 = paste(fire_name, collapse = ";")) 
+
+
+# make df with just the join_count column
+fire_overlap2005 <- oak_fire2005_2 %>% 
+  dplyr::select(fid_vegeta, join_count) %>% 
+  st_drop_geometry() %>% 
+  dplyr::rename(num_fire_overlap2005 = join_count) 
+
+# determine last fire to occur in an oak stand since 2004
+oak_fire_last_fire2005 <- oak_fire %>% 
+  mutate(year = as.numeric(year)) %>% 
+  filter(year >= 2005) %>% 
+  mutate(fire_name = str_to_title(fire_name)) %>% 
+  dplyr::select(fid_vegeta, year, fire_name) %>% 
+  st_drop_geometry() %>% 
+  group_by(fid_vegeta) %>% 
+  dplyr::mutate(last_fire_year2005 = max(year),
+                match = (last_fire_year2005 - year)) %>% 
+  filter(match == 0) %>% 
+  dplyr::select(fid_vegeta, fire_name) %>% 
+  dplyr::rename(last_fire2005 = fire_name)
+
+#combine the oak_fire subdata dfs. oak_fire_tslf and oak_fire_last_fire are from the code chunk that starts at line 53
+oak_fire_final2005_temporary1 <- inner_join(oak_fire_aggregate2005, fire_overlap2005, by = "fid_vegeta")
+oak_fire_final2005_temporary2 <- inner_join(oak_fire_final2005_temporary1, oak_fire_tslf, by = "fid_vegeta") 
+oak_fire_final2005 <-  full_join(oak_fire_final2005_temporary2, oak_fire_last_fire2005, by = "fid_vegeta")
+## so this df will have the 2005year/fire columns with null values bc there were we no fires after 2005, but some of the tslf fire and last fire year will ahve values that arent null bc some had fires b4 2005. it was just confusing the frist time seeing the nulls not match up
+
+# tidy up and parse out a couple data frames to be similar to the above oak_fire_final df
+oak_fire_history2005 <- oak_fire_final2005 %>% 
+  separate(years_2005, into = c("first_fire_year", "second_fire_year", "third_fire_year"), 
+           sep =";", fill="right", remove = F) %>% 
+  separate(fires_2005, into = c("first_fire", "second_fire", "third_fire"), 
+           sep =";", fill="right", remove =F) %>% 
+  mutate(first_fire_year = as.numeric(first_fire_year),
+         second_fire_year = as.numeric(second_fire_year),
+         third_fire_year = as.numeric(third_fire_year)) %>% 
+  mutate(last_fire2005 = replace_na(last_fire2005, "No fire since 2004")) 
+
+# remove geometry column because when converting to csv bc it messes with the entire df
+oak_fire_history2005_no_geo <- oak_fire_history2005 %>% st_drop_geometry() 
+
+# export the final oakfire history df as an excel sheet as an an ArcGIS shapefile
+#st_write(oak_fire_history2005, "oak_fire_history2005.shp", driver = "ESRI Shapefile")
+#write.csv(oak_fire_history2005_no_geo, "oak_fire_history2005.csv", row.names = F)
+
+```
+
+#summary number of oak stand with X number of fires since 2005
+```{r}
+#count number of oak stand with X number of fires in recorded history
+oak_fire_count2005 <- oak_fire_history2005 %>% 
+  group_by(num_fire_overlap2005) %>% 
+  dplyr::count() %>% 
+  st_drop_geometry()
+
+# make table
+oak_fire_count2005 %>% 
+  kable(col.names = c("Number Fires Since 2005", "Count"), align = "c", booktabs = T) %>% 
+  kable_styling(bootstrap_options = c("striped", "responsive"), 
+                full_width = F,
+                position = "center")
+
+# determine mean 
+oak_fire_count2005_summary <- oak_fire_history2005 %>% 
+  dplyr::summarise(mean_fires = mean(num_fire_overlap2005),
+                   median_fires = median(num_fire_overlap2005)) 
+```
+
+
+#create data frame for all fires that have occurred in oak stands in the MAIN fires since 2005
+
+Main fires were defined as fires that affected more than 20 oak stands (with the exception of the 2013 old fire. Marti suggested including that fire anyway)
+```{r}
+
+oak_fire_aggregate2005main <- oak_fire2005 %>% 
+  dplyr::select(fid_vegeta, year, fire_name) %>% 
+  filter(fire_name %in% c('SPRINGS','OLD', 'OLD FIRE','CORRAL', "TOPANGA", "WOOLSEY")) %>% 
+  mutate(fire_name = str_to_title(fire_name)) %>%
+  st_drop_geometry() %>% 
+  group_by(fid_vegeta) %>% 
+  dplyr::summarise(years_2005main = paste(year, collapse = ";"),
+                   fires_2005main = paste(fire_name, collapse = ";"))
+
+# make df with just the join_count column from all 2005 fires
+fire_overlap2005_2 <- oak_fire2005_2 %>% 
+  dplyr::select(fid_vegeta, join_count) %>% 
+  dplyr::rename(numfire_05 = join_count) 
+
+
+# make df with just the join_count column from MAIN 2005 fires
+fire_overlap2005_main <- oak_fire2005main_2 %>% 
+  dplyr::select(fid_vegeta, join_count) %>% 
+  dplyr::rename(numfire_05main = join_count) %>% 
+  st_drop_geometry()
+
+# determine last major fire to occur in an oak stand since 2004
+oak_fire_last_fire2005 <- oak_fire %>% 
+  mutate(year = as.numeric(year)) %>% 
+  filter(year >= 2005) %>% 
+  filter(fire_name %in% c('SPRINGS','OLD', 'OLD FIRE','CORRAL', "TOPANGA", "WOOLSEY")) %>% 
+  mutate(fire_name = str_to_title(fire_name)) %>%
+  dplyr::select(fid_vegeta, year, fire_name) %>% 
+  st_drop_geometry() %>% 
+  group_by(fid_vegeta) %>% 
+  dplyr::mutate(last_fire_year2005 = max(year),
+                match = (last_fire_year2005 - year)) %>% 
+  filter(match == 0) %>% 
+  dplyr::select(fid_vegeta, fire_name) %>% 
+  dplyr::rename(last_fire2005main = fire_name)
+
+#combine the oak_fire subdata dfs
+fire_overlap_join <- full_join(fire_overlap2005_2, fire_overlap2005_main, by = "fid_vegeta")  
+oak_fire_final2005main_temp1 <- full_join(oak_fire_aggregate2005main, fire_overlap_join, by = "fid_vegeta")
+oak_fire_final2005main_temp2 <- full_join(oak_fire_final2005main_temp1, oak_fire_last_fire2005, by = "fid_vegeta")
+oak_fire_final2005main <- merge(oak_fire_final2005main_temp2, oak_fire_tslf)
+
+# tidy up and parse out a couple data frames to be similar to the above oak_fire_final df
+oak_fire_history2005main <- oak_fire_final2005main %>% 
+  separate(years_2005main, into = c("first_fire_year", "second_fire_year", "third_fire_year"), 
+           sep =";", fill="right", remove = F) %>% 
+  separate(fires_2005main, into = c("first_fire", "second_fire", "third_fire"), 
+           sep =";", fill="right", remove =F) %>% 
+  mutate(first_fire_year = as.numeric(first_fire_year),
+         second_fire_year = as.numeric(second_fire_year)) %>% 
+  mutate(last_fire2005main = replace_na(last_fire2005main, "No major fire since 2004")) 
+
+# remove geometry column because when converting to csv bc it messes with the entire df
+oak_fire_history2005main_no_geo <- oak_fire_history2005main %>% st_as_sf() %>% st_drop_geometry() 
+
+# export the final oakfire history df as an excel sheet as an an ArcGIS shapefile
+#st_write(oak_fire_history2005main, "oak_fire_history2005main.shp", driver = "ESRI Shapefile")
+#write.csv(oak_fire_history2005main_no_geo, "oak_fire_history2005main.csv", row.names = F)
+
+
+```
+
+#plot number of fires/decade
+```{r}
+#sub data
+fire <- fire_history_samo %>% 
+  clean_names() %>% 
+  mutate (decade = case_when(
+    year < 1900 ~ "1890s",
+    year < 1909 ~ "1900s",
+    year < 1919 ~ "1910s",
+    year < 1929 ~ "1920s",
+    year < 1939 ~ "1930s",
+    year < 1949 ~ "1940s",
+    year < 1959 ~ "1950s",
+    year < 1969 ~ "1960s",
+    year < 1979 ~ "1970s",
+    year < 1989 ~ "1980s",
+    year < 1999 ~ "1990s",
+    year < 2009 ~ "2000s",
+    year < 2019 ~ "2010s"
+  )) %>% 
+  st_as_sf() %>% 
+  mutate(acres = shape_ar_1/4047) %>% 
+  st_drop_geometry() %>% 
+  mutate(id = row_number())
+
+########################## number of fires in SAMO in reecorded history ########################## 
+fire_tot <- fire %>%
+  group_by(objectid_1) %>% 
+  dplyr::count()
+##grouped by objectid_1 bc that was the original objectid/FID for the original frap polygons. When intersected the samo layer new objectid valeus were created
+##270 fires in total
+
+########################## number of acres oak woodlands ########################## 
+
+tot_oak_acres <- oak_og %>% 
+  dplyr::summarise(oak_acres = sum(acres)) #8243.5 acres of oakwoodlands in the park
+
+
+########################## number of acres burned per decade ########################## 
+
+options(scipen=10000) # remove scientific notation setting
+
+#calculat acres burned 
+acres_decade <- fire_history_samo %>% 
+  mutate (decade = case_when(
+    year < 1900 ~ "1890s",
+    year < 1909 ~ "1900s",
+    year < 1919 ~ "1910s",
+    year < 1929 ~ "1920s",
+    year < 1939 ~ "1930s",
+    year < 1949 ~ "1940s",
+    year < 1959 ~ "1950s",
+    year < 1969 ~ "1960s",
+    year < 1979 ~ "1970s",
+    year < 1989 ~ "1980s",
+    year < 1999 ~ "1990s",
+    year < 2009 ~ "2000s",
+    year < 2019 ~ "2010s"
+  )) %>% 
+  select(year, decade, acres) %>% 
+  group_by(decade) %>% 
+  dplyr::summarise(decade_acres_burned = sum(acres)) %>% 
+  filter(!is.na(decade))
+
+#plot
+ggplot(acres_decade, aes(x=decade, y=decade_acres_burned)) +
+  geom_col(fill = 'dark red') +
+  scale_y_continuous(lim = c(0,100000),
+                     breaks = seq(0,100000, by = 25000),
+                     label=comma,
+                     expand = c(0,0)) +
+  labs(title="Historical Acres Burned in SAMO", 
+       subtitle ="1925-2018", x = "\nDecade", y = "Acres Burned\n") +
+  theme_classic() 
+
+# count total acres burned in recorded history
+acres_decade_tot <- acres_decade %>% 
+  dplyr::summarise(total_acres = sum(decade_acres_burned))
+
+```
+
+########################## NPS FPL internship: raster to point conversions #############################
+
+# Baseline evi rtp (landsat)
+
+baseline layer is used to calculate the z score. Contains summer (August, October, and September) imagery from 2000-2004. 
+```{r}
+# load files and make list of file names to be used later
+files <- list.files(path = 'C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/drought_indices_outputs/baseline_evi', 
+                    pattern = "*.shp$", 
+                    full.names = T)
+
+filenames <- list.files(path = 'C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/drought_indices_outputs/baseline_evi', 
+                        pattern = "*.shp$", # the $ denotes the end of the pattern to search for. this prevents shp.xlm files from being read in in addition to .shp files
+                        full.names = F)
+
+
+# make the names a little nicer (removes the .filetype)
+filenames_list <- ldply(strsplit(filenames, ".", fixed=T))$V1
+
+# stores individual tibbles of the data files in a list 
+evi_baseline <- lapply(files, st_read) 
+
+# loop through and add columnthat stores the file name (which is the year and month of the image)
+
+for (i in 1:length(evi_baseline)) {
+  
+  # year = new column being added to each tsibble
+  evi_baseline[[i]]$year_month <- filenames_list[i]
+  
+}
+
+## now bind the layers together
+evi_baseline_untidy <- ldply(evi_baseline) 
+
+
+# tidy up the df so it is ready to go
+evi_baseline_tidy <- evi_baseline_untidy %>%
+  mutate(year_month = str_remove(year_month, pattern = "_evi")) %>%
+  dplyr::rename(evi = grid_code) %>% 
+  separate(year_month, into = c("year", "month"), remove = F, sep = "_") %>%
+  mutate(day = "01") %>% # used 01 as a default date
+  unite(date, c("year", "month", "day"), sep="", remove=F) %>%
+  mutate(date = lubridate::ymd(date)) %>% 
+  st_as_sf()
+
+# remove geometry so can export as a csv
+evi_baseline_tidy_no_geo <- evi_baseline_tidy %>% st_drop_geometry()
+
+# export df  
+#st_write(evi_baseline_tidy, "evi_baseline.shp", driver = "ESRI Shapefile")
+#write.csv(evi_baseline_tidy_no_geo, "evi_baseline.csv", row.names = F)
+
+```
+
+########################## NPS FPL internship: dieback threshold analysis #############################
+
+# Packages
+```{r}
+library(plyr)
+library(MuMIn)
+library(dismo)
+library(gbm)
+```
+
+# Load data
+
+using pivot_wider to correctly set up the data for the model
+```{r}
+threshold_df <- read.csv(here::here("Data Sheets", "evi_z_dieback_test_data.csv")) %>% 
+  filter(dieback != "Moderate Dieback") %>% #only interested in high and no dieback, since I do not really trust the subjective moderate dieback assessment
+  dplyr::select(pointid, evi_z, year, dieback) %>% 
+  dplyr::rename(year = year) %>% 
+  pivot_wider(names_from = year, 
+              values_from = evi_z) %>% 
+  clean_names()
+
+```
+
+# Threhsold analysis with Logistic regression
+
+Research Question: In which year does greenness/EVI best predict dieback? 
+  
+  Answering this question requires modeling eviz score for each drought year (which is good dbecuase the evi scaores are highly correlated with one another)
+
+Note: dieback was determined from looking at 2018 imagery. 
+
+*How to use the results to pick a threshold:*
+  
+  Once you have the predicted values for EVI values (see dat.pred2016 data frame), pick a certain probability of dieback (e.g. 95%, 90%, 80%, 50%) and in the data frame check the corresponding EVI value for the selected probability level. Use that EVI value to essentially say any value below this EVI has a x% probability of high dieback. A lower probability of dieback will result in more pixels being labeled as high dieback
+
+
+```{r}
+## logistic regression approach
+
+# make dieback binomial
+threshold_df$db <- 1 # makes new column in which high dieback = 1 (therefore when plotting probabilities, the graph will be read as "the probabiity of high dieback". If no dieback = 1, then the graph ould be read as "the probability of no dieback", which is confusing )
+threshold_df$db[which(threshold_df$dieback == "No Dieback")] <- 0 # no dieback = 0
+
+# are the evi's of the different years correlated? 
+cor(threshold_df[,3:9]) # yes, several years are correlated, so cannot make a model with each year as a variable
+
+# run different models 
+mod2011 <- glm(db ~ x2011, data=threshold_df, family="binomial")
+mod2013 <- glm(db ~ x2013, data=threshold_df, family="binomial")
+mod2014 <- glm(db ~ x2014, data=threshold_df, family="binomial")
+mod2015 <- glm(db ~ x2015, data=threshold_df, family="binomial")
+mod2016 <- glm(db ~ x2016, data=threshold_df, family="binomial")
+mod2017 <- glm(db ~ x2017, data=threshold_df, family="binomial")
+mod2018 <- glm(db ~ x2018, data=threshold_df, family="binomial")
+
+#compare the different models 
+model_comparison <- MuMIn::model.sel(mod2011, mod2013, mod2014, mod2015, mod2016, mod2017, mod2018) # lower AIC = better ; 2016 EVI z scores has the strong relationship with dieback
+
+# nice table of model.sel
+model_comparison %>% 
+  kable(col.names = c("Intercept", "2011", "2013", "2014", "2015", "2016", "2017", "2018", "df", "logLik", "AICc", "delta AICc", "Weight"), digits = 4) %>% 
+  kable_styling(bootstrap_options = "striped",
+                full_width = F, 
+                position="center")
+
+
+# make predictions based on the above models. rachel says this is NOT simulated mock test data. "We just took a bunch of sequential values along the range of our predictor variable (EVI z values in this case) so that we could plot the relationship of probability of dieback against EVI. What we did here was to take a sequence of 100 numbers from the smallest to the largest predictor value, so that we could plot a smooth curve with our predicted probability of dieback response. We didn't generate random samples from a known distribution (simulating data) and we didn't use it to test anything. 
+
+dat.pred2011 <- data.frame(x2011=seq(from=min(threshold_df$x2011), to=max(threshold_df$x2011), length.out = 100))
+dat.pred2013 <- data.frame(x2013=seq(from=min(threshold_df$x2013), to=max(threshold_df$x2013), length.out = 100))
+dat.pred2014 <- data.frame(x2014=seq(from=min(threshold_df$x2014), to=max(threshold_df$x2014), length.out = 100))
+dat.pred2015 <- data.frame(x2015=seq(from=min(threshold_df$x2015), to=max(threshold_df$x2015), length.out = 100))
+dat.pred2016 <- data.frame(x2016=seq(from=min(threshold_df$x2016), to=max(threshold_df$x2016), length.out = 1000))
+dat.pred2017 <- data.frame(x2017=seq(from=min(threshold_df$x2017), to=max(threshold_df$x2017), length.out = 100))
+dat.pred2018 <- data.frame(x2018=seq(from=min(threshold_df$x2018), to=max(threshold_df$x2018), length.out = 100))
+
+# plot the predicted values to observe the relationship between dieback (y-variable) and evi z (x-variable). x axis = range of mock data evi values, y axis = probability of high dieback
+plot(predict(mod2011, dat.pred2011, type="response")~dat.pred2011$x2011)
+plot(predict(mod2013, dat.pred2013, type="response")~dat.pred2013$x2013)
+plot(predict(mod2014, dat.pred2014, type="response")~dat.pred2014$x2014)
+plot(predict(mod2015, dat.pred2015, type="response")~dat.pred2015$x2015)
+plot(predict(mod2016, dat.pred2016, type="response")~dat.pred2016$x2016)
+plot(predict(mod2017, dat.pred2017, type="response")~dat.pred2017$x2017)
+plot(predict(mod2018, dat.pred2018, type="response")~dat.pred2018$x2018)
+
+# best model fit. Since 2016 was the best model, I will now deteremine what is the best relationship between the 2016 evi z scores and dieback. (e.g. linear v non-linear relationship)
+mod1 <- glm(db ~ x2016, data=threshold_df, family="binomial") # linar
+mod2 <- glm(db ~ poly(x2016,2), data=threshold_df, family="binomial") # squared
+mod3 <- glm(db ~ poly(x2016,3), data=threshold_df, family="binomial") # cubed
+mod4 <- glm(db ~ poly(x2016,4), data=threshold_df, family="binomial") # quadratic
+
+model_comparison2 <- MuMIn::model.sel(mod1, mod2, mod3, mod4) # lower AIC = better
+
+# nice table of model.sel
+model_comparison2 %>% 
+  kable(col.names = c("Intercept", "2016", "2016^2", "2016^3", "2016^4", "df", "logLik", "AICc", "delta AICc", "Weight"), digits = 4) %>% 
+  kable_styling(bootstrap_options = "striped",
+                full_width = F, 
+                position="center")
+# add prediction values to the dat.pred2016 df and add a year column 
+dat.pred2016$pred <- predict(mod2016, newdata=dat.pred2016, type="response")
+dat.pred2016$year <- 2016
+
+# ggplot of predictions (same as above, but more clean)
+ggplot(dat.pred2016, aes(x = x2016, y = pred)) +
+  geom_point() +
+  labs(x = "\nEVI Z Score", y = "Probability\n", title = "Dieback Threshold Analysis") +
+  scale_x_continuous(lim = c(-3,3), 
+                     breaks = seq(-3, 3, by = 1)) +
+  geom_vline(xintercept = -0.353, linetype = 2) +
+  theme_bw()
+# geom_hline(yintercept = 0.95, linetype = 2)
+
+# assess the accuracy of different thresholds with the real data (i got lazy and maually changed the threshold. the results are in the final report). .For high dieback the correct classification as high dieback is given. For No dieback, the misclassification of the pixel as high dieback is given (so just subtract that value from 1 to get the accuracy).
+acuracy <- threshold_df %>% 
+  dplyr::select(x2016, dieback) %>% 
+  filter(x2016 <= 0.004) %>% # threhsold
+  group_by(dieback) %>%
+  dplyr::count() %>% 
+  summarise(dieback_acc = n/25)
+
+
+```
+
+Notes from Rachel (UCLA post-doc project advisor):
+  
+  - AICc = adjusted AIC (which is usally done for smaller sample sizes)
+- MuMIn::model.sel output: *delta* = difference in AICc between the model with the highest AICc and the other models
+- rule of thumb: if the AIC of the top model is >2 than the next highest model, then the top model is (significantly?) better
+- MuMIn::model.sel output: *weight* = relative weight of the model. It should add up to one. If the weight is similar across all models then that is not good. 
+- when looking at the prediction graphs for a threshold, it is generally not good to use a threshold approach if the graph is showing a linear trend, which mine do not so that is good. 
+- when picking a threshold, check with the real data that the threshold actually has several points above/below it.This is becasue we are using mock test/prediction data to plot and pick thresholds from, whcih can have a much larger sample size and diverse range of values. You do not want a threshold that only has like 3 points above/below it. 
+- She does not suggest looking high than a 4th order relationship when assessing linear and noninear relationships between response and explanatory variables
+
+# Boosted regression tree approach
+
+BRT is another way to assess a threshold. I did not have time to learn BRT so rachel set it up for me. We just used it to see the model trendline to check that the trends look similar. If they do then that just increases the confidence in the logistic regression approach
+
+```{r}
+# BRT model needs to recognize the data as a data frame
+threshold_df_df <- as.data.frame(threshold_df)
+
+# run model
+modbrt1 <- dismo::gbm.step(data = threshold_df_df, gbm.x = 7, gbm.y = 11, 
+                           distribution = "bernoulli",
+                           tree.complexity = 3, 
+                           learning.rate = 0.001, 
+                           bag.fraction = 0.5,
+                           max.trees = 20000)
+
+# plot model results
+plot(modbrt1)
+
+## model diagnostics
+dev <- (modbrt1$self.statistics$mean.null - modbrt1$cv.statistics$deviance.mean) / modbrt1$self.statistics$mean.null
+auc <- mean(modbrt1$cv.roc.matrix) 
+
+## other measurements of model predictive performance from Potts and Elith, 2006
+## Potts, J.M. & Elith, J. 2006. Comparing species abundance models. Ecol. Modell. 199(2): 153–163.
+
+## first extract the observed and the predicted data
+obs <- modbrt1$data$y
+pred <- modbrt1$fitted
+
+## get RMSE (root mean squared error)
+
+rmse <- sqrt(mean((pred-obs)^2))
+
+## get Pearson's R
+
+Rsq <- cor(x=obs, y=pred, method="pearson")
+```
+############################ NPS FPL internship: excess unused code ###########################################
+
+arrange column headers alphabetically: select(noquote(order(colnames(.))))
+
+# extract means of trippet polygons
+
+no longer using polygon averages nad never ended up using the google earth polygons
+```{r}
+folds <- list.files(path = "C:/Users/amlpa/Documents/NPS_SAMO/amp_work/R/drought_indices_outputs/EVI", full.names=T)
+trippet_mod <- trippet %>% 
+  dplyr::select(Name)
+
+mean_trippet <- list()
+
+for (i in 1:length(folds)){
+  
+  rast <- raster(folds[i])
+  
+  trippet_evi <- suppressWarnings(raster::extract(rast, trippet_mod,fun= mean, na.rm=T, sp = T))
+  
+  mean_trippet[[i]] <- trippet_evi
+  
+}
+
+df <- as.data.frame(mean_trippet) 
+
+
+
+don’t worry about warnings like glm.fit: algorithm did not converge or glm.fit: fitted probabilities numerically 0 or 1 occurred. These are common on smaller datasets and usually don’t cause any issues. They typically mean your dataset is perfectly separable, which can cause problems for the math behind the model, but R’s glm() function is almost always robust enough to handle this case with no problems.https://rpubs.com/AIventurer/datacamp_R_ML_TB_Ch2
+
+threshold_final$dieback_predicted <- "not dead"
+threshold_final$dieback_predicted[which(threshold_final$evi_z <= -0.35)] <- "dead"
+
+evi_points <- rasterToPoints(evi, spatial=T)
+evi_points <- as.data.frame(evi_points) %>% 
+  unite(x_y, c("x", "y"), sep=";", remove=F)
+unique(evi_points$x)
+
+store unique values from a column in a list: unique_points <- lapply(points$grid_code, unique)
+
+oak_fire2005main <- read_csv(here::here("Data Sheets", 'oak_fire_final2005main.csv')) %>% 
+  dplyr::select(-X1) 
+oak_fire2005main[is.na(oak_fire2005main)] <- "no major fires since 2005"
+
+
+
+trippet_df <- df %>% 
+  dplyr::select(contains('evi'), Name)
+
+trippet_evi <- full_join(trippet, trippet_df, by = "Name") %>% 
+  pivot_longer('X2004_evi':'X2019_evi',
+               names_to = "evi_year",
+               values_to = "evi") %>% 
+  mutate(evi_year = str_remove(evi_year, pattern = "X")) %>% 
+  mutate(evi_year = str_remove(evi_year, pattern = "_evi")) %>%
+  mutate(evi_year = as.numeric(evi_year)) %>% 
+  clean_names() %>% 
+  filter(name == '227')
+
+# remove string from column headers
+names(trippet_evi) = gsub(pattern = "x_", replacement = "", x= names(trippet_evi))
+
+
+ggplot(trippet_evi, aes(x = evi_year, y=evi)) + geom_point() + geom_line()
+```
 
